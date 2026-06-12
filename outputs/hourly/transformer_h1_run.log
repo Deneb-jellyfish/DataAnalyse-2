@@ -1,0 +1,24 @@
+============================================================
+Transformer +1h
+============================================================
+  Train seqs: 16816, Val seqs: 4169, Test seqs: 5223
+  Features: 20, input_dim: 20
+  Model params: 101825
+  Epoch   1/40  train_loss=5888.2379  val_loss=4060.7093
+  Epoch  10/40  train_loss=290.5316  val_loss=341.3924
+  Epoch  20/40  train_loss=234.7722  val_loss=360.8396
+  Early stopping at epoch 22, best epoch=14
+  Best epoch: 14, best val loss: 290.5657
+  Train time: 315.7s
+  Test RMSE=17.17, MAE=9.66, MAPE=22.3%
+  Saved: /Users/linmengyuan/Desktop/github/DataAnalyse-2/outputs/hourly/transformer_predictions_h1.csv
+  Saved: /Users/linmengyuan/Desktop/github/DataAnalyse-2/outputs/hourly/transformer_predictions_h1_val.csv
+  Saved: /Users/linmengyuan/Desktop/github/DataAnalyse-2/outputs/hourly/transformer_h1.pt
+Metrics saved: /Users/linmengyuan/Desktop/github/DataAnalyse-2/outputs/hourly/transformer_metrics.csv
+History saved: /Users/linmengyuan/Desktop/github/DataAnalyse-2/outputs/hourly/transformer_train_history.json
+Registry updated: /Users/linmengyuan/Desktop/github/DataAnalyse-2/outputs/hourly/experiment_registry.csv
+
+============================================================
+Transformer Summary
+============================================================
+  +1h: RMSE=17.17, MAE=9.66, MAPE=22.3%

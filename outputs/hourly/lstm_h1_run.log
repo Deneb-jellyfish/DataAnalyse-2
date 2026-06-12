@@ -1,0 +1,24 @@
+
+============================================================
+LSTM +1h
+============================================================
+  Train: 16826, Val: 4207, Test: 5223
+  Features: 20, Seq len: 48, Horizon: 1h
+  Epoch   1/50: train_loss=7072.2491, val_loss=5996.6356
+  Epoch  10/50: train_loss=3309.1571, val_loss=3392.1229
+  Epoch  20/50: train_loss=1279.7036, val_loss=1331.6208
+  Epoch  30/50: train_loss=694.3014, val_loss=791.8989
+  Epoch  40/50: train_loss=439.2625, val_loss=567.0989
+  Epoch  50/50: train_loss=300.9546, val_loss=464.1078
+  Train time: 749.6s
+  Test RMSE=22.22, MAE=12.04, MAPE=23.8%
+  Predictions saved: /Users/linmengyuan/Desktop/github/DataAnalyse-2/outputs/hourly/lstm_predictions_h1.csv
+  Model saved: /Users/linmengyuan/Desktop/github/DataAnalyse-2/outputs/hourly/lstm_h1.pkl
+
+Metrics saved: /Users/linmengyuan/Desktop/github/DataAnalyse-2/outputs/hourly/lstm_metrics.csv
+Training history saved: /Users/linmengyuan/Desktop/github/DataAnalyse-2/outputs/hourly/lstm_train_history.json
+
+============================================================
+LSTM Summary
+============================================================
+  +1h: RMSE=22.22, MAE=12.04, MAPE=23.8%

@@ -1,3 +1,3 @@
 model,horizon_hours,rmse,mae,mape,n_train,n_test,fit_time_s,pred_time_s,fallback_reason,notes
-Prophet,1,63.67771988529199,47.51365685536043,157.30324053411377,9318,6983,2.7,1.0,,
-Prophet,24,63.85706093472221,47.568261648017426,156.76434677789223,9318,6930,1.3,0.9,,
+Prophet,1,98.70131961553203,73.73790980595732,100.0,9318,6983,8.9,0.3,Prophet not available; using statsmodels STL decomposition,
+Prophet,24,99.00058764737346,74.05338973189033,100.0,9318,6930,0.0,0.3,Prophet not available; using statsmodels STL decomposition,

@@ -1,0 +1,2 @@
+model,horizon_hours,rmse,mae,mape,n_train,n_val,n_test,best_epoch,best_val_loss,train_time_s,model_params,notes
+Transformer,1,17.16500565476565,9.658417908649593,22.28974958378519,16816,4169,5223,14,290.56565619959974,315.7,101825,

@@ -33,7 +33,10 @@ torch.manual_seed(42)
 
 OUTPUT_DIR = ROOT / "outputs" / "hourly"
 FEATURES_DIR = PROCESSED_DIR / "features_hourly"
-BATCH_SIZE = 64
+DEFAULT_BATCH_SIZE = 64
+
+torch.set_num_threads(4)
+np.random.seed(42)
 
 
 # ==============================================================================
@@ -157,7 +160,10 @@ def make_prediction_csv(
 # ==============================================================================
 
 def create_dataloader(
-    X_seq: np.ndarray, y_seq: np.ndarray, batch_size: int = BATCH_SIZE, shuffle: bool = True
+    X_seq: np.ndarray,
+    y_seq: np.ndarray,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    shuffle: bool = True,
 ) -> DataLoader:
     """Create a DataLoader from numpy arrays."""
     dataset = TensorDataset(
@@ -171,7 +177,7 @@ def create_dataloader(
 # Run tasks
 # ==============================================================================
 
-def run_h1() -> dict:
+def run_h1(batch_size: int, epochs: int, patience: int, lr: float) -> tuple[dict, TransformerTrainer]:
     """Train and evaluate Transformer for +1h prediction."""
     print("=" * 60)
     print("Transformer +1h")
@@ -187,7 +193,7 @@ def run_h1() -> dict:
     dates_tr = dates_train[:val_split]
     dates_va = dates_train[val_split:]
 
-    seq_len = 24
+    seq_len = 48
     horizon = 1
 
     # Create sequences
@@ -203,9 +209,9 @@ def run_h1() -> dict:
     print(f"  Features: {len(feature_names)}, input_dim: {X_tr_seq.shape[2]}")
 
     # Create dataloaders
-    train_loader = create_dataloader(X_tr_seq, y_tr_seq, shuffle=False)
-    val_loader = create_dataloader(X_va_seq, y_va_seq, shuffle=False)
-    test_loader = create_dataloader(X_te_seq, y_te_seq, shuffle=False)
+    train_loader = create_dataloader(X_tr_seq, y_tr_seq, batch_size=batch_size, shuffle=True)
+    val_loader = create_dataloader(X_va_seq, y_va_seq, batch_size=batch_size, shuffle=False)
+    test_loader = create_dataloader(X_te_seq, y_te_seq, batch_size=batch_size, shuffle=False)
 
     # Build model
     model = TimeSeriesTransformer(
@@ -220,10 +226,10 @@ def run_h1() -> dict:
     print(f"  Model params: {sum(p.numel() for p in model.parameters())}")
 
     # Train
-    trainer = TransformerTrainer(model, lr=1e-3)
+    trainer = TransformerTrainer(model, lr=lr)
     t0 = time.time()
     train_result = trainer.train(
-        train_loader, val_loader, epochs=100, patience=15, verbose=True
+        train_loader, val_loader, epochs=epochs, patience=patience, verbose=True
     )
     train_time = time.time() - t0
     print(f"  Best epoch: {train_result['best_epoch']}, "
@@ -250,6 +256,9 @@ def run_h1() -> dict:
         forecast_va, y_va_seq, val_pred, horizon=horizon,
         model_name="Transformer", split="val"
     )
+    val_pred_path = OUTPUT_DIR / "transformer_predictions_h1_val.csv"
+    val_df.to_csv(val_pred_path, index=False)
+    print(f"  Saved: {val_pred_path}")
 
     # Save model
     model_path = OUTPUT_DIR / "transformer_h1.pt"
@@ -280,7 +289,7 @@ def run_h1() -> dict:
     return result, trainer
 
 
-def run_h24() -> dict:
+def run_h24(batch_size: int, epochs: int, patience: int, lr: float) -> tuple[dict, TransformerTrainer]:
     """Train and evaluate Transformer for +24h prediction."""
     print("=" * 60)
     print("Transformer +24h")
@@ -312,9 +321,9 @@ def run_h24() -> dict:
     print(f"  Features: {len(feature_names)}, input_dim: {X_tr_seq.shape[2]}")
 
     # Create dataloaders
-    train_loader = create_dataloader(X_tr_seq, y_tr_seq, shuffle=False)
-    val_loader = create_dataloader(X_va_seq, y_va_seq, shuffle=False)
-    test_loader = create_dataloader(X_te_seq, y_te_seq, shuffle=False)
+    train_loader = create_dataloader(X_tr_seq, y_tr_seq, batch_size=batch_size, shuffle=True)
+    val_loader = create_dataloader(X_va_seq, y_va_seq, batch_size=batch_size, shuffle=False)
+    test_loader = create_dataloader(X_te_seq, y_te_seq, batch_size=batch_size, shuffle=False)
 
     # Build model
     model = TimeSeriesTransformer(
@@ -329,10 +338,10 @@ def run_h24() -> dict:
     print(f"  Model params: {sum(p.numel() for p in model.parameters())}")
 
     # Train
-    trainer = TransformerTrainer(model, lr=1e-3)
+    trainer = TransformerTrainer(model, lr=lr)
     t0 = time.time()
     train_result = trainer.train(
-        train_loader, val_loader, epochs=100, patience=15, verbose=True
+        train_loader, val_loader, epochs=epochs, patience=patience, verbose=True
     )
     train_time = time.time() - t0
     print(f"  Best epoch: {train_result['best_epoch']}, "
@@ -359,6 +368,9 @@ def run_h24() -> dict:
         forecast_va, y_va_seq, val_pred, horizon=horizon,
         model_name="Transformer", split="val"
     )
+    val_pred_path = OUTPUT_DIR / "transformer_predictions_h24_val.csv"
+    val_df.to_csv(val_pred_path, index=False)
+    print(f"  Saved: {val_pred_path}")
 
     # Save model
     model_path = OUTPUT_DIR / "transformer_h24.pt"
@@ -463,6 +475,10 @@ def main() -> None:
         "--task", default="both", choices=["h1", "h24", "both"],
         help="Prediction horizon task",
     )
+    parser.add_argument("--epochs", type=int, default=100, help="Max training epochs")
+    parser.add_argument("--patience", type=int, default=15, help="Early stopping patience")
+    parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE, help="Batch size")
+    parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
     args = parser.parse_args()
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -472,13 +488,23 @@ def main() -> None:
     all_horizons: list[int] = []
 
     if args.task in ("h1", "both"):
-        r, trainer = run_h1()
+        r, trainer = run_h1(
+            batch_size=args.batch_size,
+            epochs=args.epochs,
+            patience=args.patience,
+            lr=args.lr,
+        )
         all_rows.append(r)
         all_trainers.append(trainer)
         all_horizons.append(1)
 
     if args.task in ("h24", "both"):
-        r, trainer = run_h24()
+        r, trainer = run_h24(
+            batch_size=args.batch_size,
+            epochs=args.epochs,
+            patience=args.patience,
+            lr=args.lr,
+        )
         all_rows.append(r)
         all_trainers.append(trainer)
         all_horizons.append(24)

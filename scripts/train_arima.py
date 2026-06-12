@@ -78,12 +78,14 @@ def make_prediction_records(
     split: str = "test",
 ) -> list[dict]:
     """Build list-of-dicts conforming to the unified predictions schema."""
-    target_dt = forecast_times + pd.Timedelta(hours=horizon)
+    forecast_dt = pd.to_datetime(forecast_times).to_numpy()
+    target_dt = forecast_dt + np.timedelta64(horizon, "h")
+
     records = []
-    for i in range(len(forecast_times)):
+    for i in range(len(forecast_dt)):
         records.append({
-            "forecast_origin_time": forecast_times[i].strftime("%Y-%m-%d %H:%M:%S"),
-            "target_time": target_dt[i].strftime("%Y-%m-%d %H:%M:%S"),
+            "forecast_origin_time": pd.Timestamp(forecast_dt[i]).strftime("%Y-%m-%d %H:%M:%S"),
+            "target_time": pd.Timestamp(target_dt[i]).strftime("%Y-%m-%d %H:%M:%S"),
             "horizon_hours": horizon,
             "city": city,
             "model": model_name,

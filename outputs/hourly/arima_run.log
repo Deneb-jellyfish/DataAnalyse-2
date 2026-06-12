@@ -1,0 +1,28 @@
+Loading data ...
+  Total series length: 34941
+  Date range: 2013-03-01 00:00:00  ->  2017-02-28 23:00:00
+  Train capped to last 12000 hours
+  Train: 12000  (ending 2016-05-12 07:00:00)
+  Test:  6989  (2016-05-12 08:00:00 -> 2017-02-28 23:00:00)
+
+Fitting ARIMA on training series ...
+  order=(7, 1, 3), seasonal_order=(0, 0, 0, 0)
+  (non-seasonal: seasonal SARIMA s=24 intractable on this data size)
+  Fitted in 16.9s
+  AIC=86332.9, BIC=86414.2
+
+  Test set has 6989 points -> evaluating every 6th point (1165 points)
+============================================================
+ARIMA +1h  rolling one-step-ahead forecast
+  Evaluating at 1165 / 6989 points
+============================================================
+  Predictions computed in 536.0s
+  RMSE=8.54, MAE=5.03, MAPE=10.8%, n=1165
+  Saved: /Users/linmengyuan/Desktop/github/DataAnalyse-2/outputs/hourly/arima_predictions_h1.csv  (1165 rows)
+
+Re-fitting ARIMA for +24h (fresh state) ...
+============================================================
+ARIMA +24h 24-step-ahead forecast
+  Evaluating at 1161 / 6989 points
+  (last 24 excluded from evaluation)
+============================================================
