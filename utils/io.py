@@ -16,6 +16,8 @@ BEIJING_DIR = PROCESSED_DIR / "beijing"
 FIVE_CITY_DIR = PROCESSED_DIR / "five_city"
 ALIGNED_DIR = PROCESSED_DIR / "aligned"
 FEATURES_DIR = PROCESSED_DIR / "features"
+FEATURES_HOURLY_DIR = PROCESSED_DIR / "features_hourly"
+ALIGNED_HOURLY_DIR = PROCESSED_DIR / "aligned_hourly"
 DOCS_DIR = ROOT / "docs"
 
 MISSING_TOKENS: set[Any] = {"", "NA", "NaN", "nan", None}
@@ -25,6 +27,24 @@ OVERLAP_END = datetime(2015, 12, 31, 23, 0, 0)
 
 UNIFIED_FIELDS = [
     "date",
+    "city",
+    "pm25",
+    "pm10",
+    "so2",
+    "no2",
+    "co",
+    "o3",
+    "temp",
+    "pres",
+    "dewp",
+    "humidity",
+    "wind_dir",
+    "wind_speed",
+    "precipitation",
+]
+
+UNIFIED_HOURLY_FIELDS = [
+    "datetime",
     "city",
     "pm25",
     "pm10",
@@ -160,7 +180,15 @@ def estimate_humidity(temp: float | None, dewp: float | None) -> float | None:
 
 def ensure_output_dirs() -> None:
     """Create processed output directories if needed."""
-    for directory in (BEIJING_DIR, FIVE_CITY_DIR, ALIGNED_DIR, FEATURES_DIR, DOCS_DIR):
+    for directory in (
+        BEIJING_DIR,
+        FIVE_CITY_DIR,
+        ALIGNED_DIR,
+        ALIGNED_HOURLY_DIR,
+        FEATURES_DIR,
+        FEATURES_HOURLY_DIR,
+        DOCS_DIR,
+    ):
         directory.mkdir(parents=True, exist_ok=True)
 
 

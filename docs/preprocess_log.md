@@ -49,8 +49,12 @@
 
 - `beijing.csv` 行数：1105
 - `shanghai.csv` 行数：2191
+- `beijing_hourly.csv` 行数：26520
+- `shanghai_hourly.csv` 行数：52584
 - `aligned/beijing.csv` 行数：777
 - `aligned/shanghai.csv` 行数：777
+- `aligned_hourly/beijing.csv` 行数：18648
+- `aligned_hourly/shanghai.csv` 行数：18648
 - 对齐日期范围：2013-03-01 至 2015-12-31
 
 ## 五城市小时级输出

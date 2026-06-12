@@ -18,20 +18,25 @@ def run_preprocess() -> None:
     result = run_full_preprocess()
     print(
         f"[preprocess] Beijing daily: {result['beijing_rows']}, "
+        f"hourly: {result['beijing_hourly_rows']}, "
         f"Shanghai daily: {result['shanghai_rows']}, "
-        f"Aligned: {result['aligned_beijing_rows']}"
+        f"hourly: {result['shanghai_hourly_rows']}, "
+        f"Aligned daily: {result['aligned_beijing_rows']}, "
+        f"hourly: {result['aligned_beijing_hourly_rows']}"
     )
 
 
-def run_features() -> None:
+def run_features(granularity: str = "daily") -> None:
     """Build feature matrices for tree-based models."""
     from utils.feature_engineering import build_feature_matrices
 
-    metadata = build_feature_matrices()
-    print(
-        f"[features] X_train {metadata['n_train']}x{metadata['n_features']}, "
-        f"X_test {metadata['n_test']}x{metadata['n_features']}"
-    )
+    granularities = ["daily", "hourly"] if granularity == "both" else [granularity]
+    for item in granularities:
+        metadata = build_feature_matrices(granularity=item)
+        print(
+            f"[features:{item}] X_train {metadata['n_train']}x{metadata['n_features']}, "
+            f"X_test {metadata['n_test']}x{metadata['n_features']}"
+        )
 
 
 def main() -> None:
@@ -44,6 +49,12 @@ def main() -> None:
         choices=["preprocess", "features", "all"],
         help="Pipeline steps to run",
     )
+    parser.add_argument(
+        "--granularity",
+        default="both",
+        choices=["daily", "hourly", "both"],
+        help="Feature granularity to build (default: both)",
+    )
     args = parser.parse_args()
     steps = args.steps
     if "all" in steps:
@@ -52,7 +63,7 @@ def main() -> None:
     if "preprocess" in steps:
         run_preprocess()
     if "features" in steps:
-        run_features()
+        run_features(granularity=args.granularity)
 
     print("Pipeline complete.")
 

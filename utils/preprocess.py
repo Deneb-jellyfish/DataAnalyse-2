@@ -11,6 +11,7 @@ from typing import Any
 
 from utils.io import (
     ALIGNED_DIR,
+    ALIGNED_HOURLY_DIR,
     BEIJING_DIR,
     FIVE_CITY_DIR,
     MISSING_TOKENS,
@@ -23,6 +24,7 @@ from utils.io import (
     SHORT_GAP_LIMIT,
     SPIKE_COLUMNS,
     UNIFIED_FIELDS,
+    UNIFIED_HOURLY_FIELDS,
     ensure_output_dirs,
     estimate_humidity,
     fill_categorical,
@@ -86,6 +88,65 @@ def drop_long_gap_rows(
     """Remove daily rows whose date falls in bad_dates."""
     filtered = [row for row in daily_rows if row["date"] not in bad_dates]
     return filtered, len(daily_rows) - len(filtered)
+
+
+def beijing_hourly_to_unified(
+    city_rows: list[dict[str, Any]], bad_dates: set[date]
+) -> list[dict[str, Any]]:
+    """Map Beijing PRSA hourly city rows to the unified handoff schema."""
+    unified: list[dict[str, Any]] = []
+    for row in city_rows:
+        dt = datetime.strptime(row["datetime"], "%Y-%m-%d %H:%M:%S")
+        if dt.date() in bad_dates:
+            continue
+        temp = row.get("TEMP")
+        dewp = row.get("DEWP")
+        unified.append(
+            {
+                "datetime": row["datetime"],
+                "city": "Beijing",
+                "pm25": row.get("PM2.5"),
+                "pm10": row.get("PM10"),
+                "so2": row.get("SO2"),
+                "no2": row.get("NO2"),
+                "co": row.get("CO"),
+                "o3": row.get("O3"),
+                "temp": temp,
+                "pres": row.get("PRES"),
+                "dewp": dewp,
+                "humidity": estimate_humidity(temp, dewp),
+                "wind_dir": None,
+                "wind_speed": row.get("WSPM"),
+                "precipitation": row.get("RAIN"),
+            }
+        )
+    return unified
+
+
+def shanghai_hourly_to_unified(hourly_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Map Shanghai hourly cleaned rows to the unified handoff schema."""
+    unified: list[dict[str, Any]] = []
+    for row in hourly_rows:
+        unified.append(
+            {
+                "datetime": row["datetime"],
+                "city": "Shanghai",
+                "pm25": row.get("pm25_city"),
+                "pm10": None,
+                "so2": None,
+                "no2": None,
+                "co": None,
+                "o3": None,
+                "temp": row.get("TEMP"),
+                "pres": row.get("PRES"),
+                "dewp": row.get("DEWP"),
+                "humidity": row.get("HUMI"),
+                "wind_dir": row.get("wind_dir"),
+                "wind_speed": row.get("wind_speed"),
+                "precipitation": row.get("precipitation"),
+            }
+        )
+    return unified
 
 
 def beijing_daily_to_unified(daily_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -176,6 +237,21 @@ def align_cities(
     aligned_shanghai: list[dict[str, Any]] = []
     for row in beijing_rows:
         sh_row = shanghai_by_date.get(row["date"])
+        if sh_row is not None:
+            aligned_beijing.append(row)
+            aligned_shanghai.append(sh_row)
+    return aligned_beijing, aligned_shanghai
+
+
+def align_cities_hourly(
+    beijing_rows: list[dict[str, Any]], shanghai_rows: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Inner-join Beijing and Shanghai hourly rows on datetime."""
+    shanghai_by_datetime = {row["datetime"]: row for row in shanghai_rows}
+    aligned_beijing: list[dict[str, Any]] = []
+    aligned_shanghai: list[dict[str, Any]] = []
+    for row in beijing_rows:
+        sh_row = shanghai_by_datetime.get(row["datetime"])
         if sh_row is not None:
             aligned_beijing.append(row)
             aligned_shanghai.append(sh_row)
@@ -364,6 +440,8 @@ def clean_prsa_files() -> dict[str, Any]:
         "spike_counts": dict(spike_counts),
         "dropped_daily_rows": dropped_days,
         "daily_rows": daily_rows,
+        "city_rows": city_rows,
+        "bad_dates": station_bad_dates,
     }
 
 
@@ -563,8 +641,12 @@ def write_preprocess_log(result: dict[str, Any]) -> None:
             "",
             f"- `beijing.csv` 行数：{result['beijing_rows']}",
             f"- `shanghai.csv` 行数：{result['shanghai_rows']}",
+            f"- `beijing_hourly.csv` 行数：{result['beijing_hourly_rows']}",
+            f"- `shanghai_hourly.csv` 行数：{result['shanghai_hourly_rows']}",
             f"- `aligned/beijing.csv` 行数：{result['aligned_beijing_rows']}",
             f"- `aligned/shanghai.csv` 行数：{result['aligned_shanghai_rows']}",
+            f"- `aligned_hourly/beijing.csv` 行数：{result['aligned_beijing_hourly_rows']}",
+            f"- `aligned_hourly/shanghai.csv` 行数：{result['aligned_shanghai_hourly_rows']}",
             f"- 对齐日期范围：{OVERLAP_START.date().isoformat()} 至 {OVERLAP_END.date().isoformat()}",
             "",
             "## 五城市小时级输出",
@@ -594,18 +676,40 @@ def run_full_preprocess() -> dict[str, Any]:
     shanghai_unified = shanghai_hourly_to_daily(city_summary["shanghai_hourly"])
     aligned_beijing, aligned_shanghai = align_cities(beijing_unified, shanghai_unified)
 
+    beijing_hourly_unified = beijing_hourly_to_unified(
+        beijing_summary["city_rows"], beijing_summary["bad_dates"]
+    )
+    shanghai_hourly_unified = shanghai_hourly_to_unified(city_summary["shanghai_hourly"])
+    aligned_beijing_hourly, aligned_shanghai_hourly = align_cities_hourly(
+        beijing_hourly_unified, shanghai_hourly_unified
+    )
+
     write_csv(PROCESSED_DIR / "beijing.csv", UNIFIED_FIELDS, beijing_unified)
     write_csv(PROCESSED_DIR / "shanghai.csv", UNIFIED_FIELDS, shanghai_unified)
+    write_csv(PROCESSED_DIR / "beijing_hourly.csv", UNIFIED_HOURLY_FIELDS, beijing_hourly_unified)
+    write_csv(
+        PROCESSED_DIR / "shanghai_hourly.csv", UNIFIED_HOURLY_FIELDS, shanghai_hourly_unified
+    )
     write_csv(ALIGNED_DIR / "beijing.csv", UNIFIED_FIELDS, aligned_beijing)
     write_csv(ALIGNED_DIR / "shanghai.csv", UNIFIED_FIELDS, aligned_shanghai)
+    write_csv(
+        ALIGNED_HOURLY_DIR / "beijing.csv", UNIFIED_HOURLY_FIELDS, aligned_beijing_hourly
+    )
+    write_csv(
+        ALIGNED_HOURLY_DIR / "shanghai.csv", UNIFIED_HOURLY_FIELDS, aligned_shanghai_hourly
+    )
 
     result = {
         "beijing_summary": beijing_summary,
         "city_summary": {k: v for k, v in city_summary.items() if k != "shanghai_hourly"},
         "beijing_rows": len(beijing_unified),
         "shanghai_rows": len(shanghai_unified),
+        "beijing_hourly_rows": len(beijing_hourly_unified),
+        "shanghai_hourly_rows": len(shanghai_hourly_unified),
         "aligned_beijing_rows": len(aligned_beijing),
         "aligned_shanghai_rows": len(aligned_shanghai),
+        "aligned_beijing_hourly_rows": len(aligned_beijing_hourly),
+        "aligned_shanghai_hourly_rows": len(aligned_shanghai_hourly),
     }
     write_preprocess_log(result)
     return result
