@@ -62,9 +62,9 @@ WIND_DIR_ENCODING = {
 def _is_holiday(date_value: pd.Timestamp) -> int:
     """Return 1 if date is a Chinese public holiday, else 0."""
     try:
-        import chinesecalendar
+        import chinese_calendar
 
-        return int(chinesecalendar.is_holiday(date_value.date()))
+        return int(chinese_calendar.is_holiday(date_value.date()))
     except Exception:
         return 0
 

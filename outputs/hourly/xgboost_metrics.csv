@@ -1,0 +1,2 @@
+model,horizon_hours,rmse,mae,mape,n_train,n_val,n_test,best_iteration,train_time_s,notes
+XGBoost,24,58.881236960230694,44.627478366692806,180.17264783215202,22239,5560,6950,38,0.3,
