@@ -367,7 +367,7 @@ with st.sidebar:
 
 if current_page == "📊  项目总览":
     st.subheader("项目总览")
-    st.write("这个项目目前包含两条主线：一条是已经完成的“下一天 PM2.5 预测”，另一条是准备扩展的“未来七天 PM2.5 预测”。")
+    st.write('这个项目目前包含两条主线：一条是已经完成的"下一天 PM2.5 预测"，另一条是准备扩展的"未来七天 PM2.5 预测"。')
 
     metric_col_1, metric_col_2, metric_col_3, metric_col_4 = st.columns(4)
     metric_col_1.metric("北京日级样本数", f"{beijing_summary['rows']}")
