@@ -1,12 +1,4 @@
-"""Train Transformer for hourly PM2.5 prediction tasks (+1h and +24h).
-
-Uses the same data pipeline and sequence construction as LSTM for fair comparison.
-
-Usage:
-  python scripts/train_transformer.py --task h1
-  python scripts/train_transformer.py --task h24
-  python scripts/train_transformer.py --task both
-"""
+"""Train Transformer for hourly PM2.5 prediction tasks (+1h and +12h)."""
 
 from __future__ import annotations
 
@@ -24,111 +16,59 @@ from torch.utils.data import DataLoader, TensorDataset
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from models.transformer_model import TimeSeriesTransformer, TransformerTrainer
 from evaluation.metrics import compute_metrics
-from utils.feature_engineering import build_hourly_feature_frame, StandardScaler
+from models.transformer_model import TimeSeriesTransformer, TransformerTrainer
+from utils.feature_engineering import StandardScaler, build_hourly_feature_frame
 from utils.io import PROCESSED_DIR
-
-torch.manual_seed(42)
 
 OUTPUT_DIR = ROOT / "outputs" / "hourly"
 FEATURES_DIR = PROCESSED_DIR / "features_hourly"
-DEFAULT_BATCH_SIZE = 64
 
-torch.set_num_threads(4)
 np.random.seed(42)
+torch.manual_seed(42)
+torch.set_num_threads(4)
 
 
-# ==============================================================================
-# Sequence construction (same as LSTM)
-# ==============================================================================
+def create_sequences(X: np.ndarray, y: np.ndarray, seq_len: int, horizon: int) -> tuple[np.ndarray, np.ndarray]:
+    n_windows = len(X) - seq_len - horizon + 1
+    if n_windows <= 0:
+        raise ValueError(f"Not enough samples for seq_len={seq_len}, horizon={horizon}")
+    X_seq = np.zeros((n_windows, seq_len, X.shape[1]), dtype=np.float32)
+    y_seq = np.zeros(n_windows, dtype=np.float32)
+    for i in range(n_windows):
+        X_seq[i] = X[i : i + seq_len]
+        y_seq[i] = y[i + seq_len + horizon - 1]
+    return X_seq, y_seq
 
-def create_sequences(
-    X: np.ndarray, y: np.ndarray, seq_len: int, horizon: int
-) -> tuple[np.ndarray, np.ndarray]:
-    """Build sliding-window sequences.
-
-    Args:
-        X: (n_samples, n_features) feature matrix
-        y: (n_samples,) target array (unshifted pm25)
-        seq_len: length of input window
-        horizon: forecast steps beyond the end of the sequence
-
-    Returns:
-        X_seq: (n_sequences, seq_len, n_features)
-        y_seq: (n_sequences,)
-    """
-    X_seq, y_seq = [], []
-    for i in range(len(X) - seq_len - horizon + 1):
-        X_seq.append(X[i : i + seq_len])
-        y_seq.append(y[i + seq_len + horizon - 1])
-    return np.array(X_seq), np.array(y_seq)
-
-
-# ==============================================================================
-# Data loading
-# ==============================================================================
 
 def load_h1_data():
-    """Load pre-built +1h feature matrices and create sequences.
-
-    Features are from features_hourly/ (y = current pm25, unshifted).
-    Sequences: 24-hour input -> predict +1h.
-    """
     X_train = np.load(FEATURES_DIR / "X_train.npy")
     X_test = np.load(FEATURES_DIR / "X_test.npy")
     y_train = np.load(FEATURES_DIR / "y_train.npy")
     y_test = np.load(FEATURES_DIR / "y_test.npy")
     dates_train = np.load(FEATURES_DIR / "dates_train.npy", allow_pickle=True)
     dates_test = np.load(FEATURES_DIR / "dates_test.npy", allow_pickle=True)
-    with open(FEATURES_DIR / "feature_names.json") as f:
+    with open(FEATURES_DIR / "feature_names.json", encoding="utf-8") as f:
         feature_names = json.load(f)
-
     return X_train, X_test, y_train, y_test, dates_train, dates_test, feature_names
 
 
-def load_h24_data():
-    """Build +24h data by reading raw CSV and creating sequences.
-
-    Builds features from beijing_hourly.csv.
-    Target is unshifted pm25; the horizon=24 in create_sequences
-    handles the 24h-ahead offset.
-    Sequences: 48-hour input -> predict +24h.
-    """
+def load_h12_data():
     df = pd.read_csv(PROCESSED_DIR / "beijing_hourly.csv")
     frame, feature_names = build_hourly_feature_frame(df)
-
-    # Keep datetime and pm25 columns for later use
-    frame = frame.copy()
-
-    # Drop rows with NaN in features
-    valid = frame.dropna(subset=feature_names).reset_index(drop=True)
-    print(f"  h24 valid rows: {len(valid)} (dropped {len(frame) - len(valid)})")
-
-    # Chronological 80/20 split
+    valid = frame.dropna(subset=feature_names + ["pm25"]).reset_index(drop=True)
     split_idx = int(len(valid) * 0.8)
-    train = valid.iloc[:split_idx]
-    test = valid.iloc[split_idx:]
+    train, test = valid.iloc[:split_idx], valid.iloc[split_idx:]
 
-    # Scale features using train stats
     scaler = StandardScaler()
     X_train = scaler.fit_transform(train[feature_names].values)
     X_test = scaler.transform(test[feature_names].values)
-
-    # Target: unshifted pm25 (horizon handled by create_sequences)
     y_train = train["pm25"].values.astype(np.float64)
     y_test = test["pm25"].values.astype(np.float64)
-
     dates_train = train["datetime"].values
     dates_test = test["datetime"].values
-
-    print(f"  h24 train: {len(train)}, test: {len(test)}")
     return X_train, X_test, y_train, y_test, dates_train, dates_test, feature_names
 
-
-# ==============================================================================
-# Prediction CSV builder
-# ==============================================================================
 
 def make_prediction_csv(
     forecast_times: np.ndarray,
@@ -139,81 +79,46 @@ def make_prediction_csv(
     city: str = "Beijing",
     split: str = "test",
 ) -> pd.DataFrame:
-    """Build unified-format predictions DataFrame."""
     forecast_dt = pd.to_datetime(forecast_times)
-    target_dt = forecast_dt + pd.Timedelta(hours=horizon)
-
-    return pd.DataFrame({
-        "forecast_origin_time": forecast_dt.strftime("%Y-%m-%d %H:%M:%S"),
-        "target_time": target_dt.strftime("%Y-%m-%d %H:%M:%S"),
-        "horizon_hours": horizon,
-        "city": city,
-        "model": model_name,
-        "y_true": y_true,
-        "y_pred": y_pred,
-        "split": split,
-    })
-
-
-# ==============================================================================
-# Dataset helper
-# ==============================================================================
-
-def create_dataloader(
-    X_seq: np.ndarray,
-    y_seq: np.ndarray,
-    batch_size: int = DEFAULT_BATCH_SIZE,
-    shuffle: bool = True,
-) -> DataLoader:
-    """Create a DataLoader from numpy arrays."""
-    dataset = TensorDataset(
-        torch.tensor(X_seq, dtype=torch.float32),
-        torch.tensor(y_seq, dtype=torch.float32),
+    target_dt = forecast_dt + pd.Timedelta(hours=int(horizon))
+    return pd.DataFrame(
+        {
+            "forecast_origin_time": forecast_dt.strftime("%Y-%m-%d %H:%M:%S"),
+            "target_time": target_dt.strftime("%Y-%m-%d %H:%M:%S"),
+            "horizon_hours": int(horizon),
+            "city": city,
+            "model": model_name,
+            "y_true": y_true,
+            "y_pred": y_pred,
+            "split": split,
+        }
     )
-    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
 
 
-# ==============================================================================
-# Run tasks
-# ==============================================================================
+def _run(task: str, batch_size: int, epochs: int, patience: int, lr: float) -> tuple[dict, TransformerTrainer]:
+    if task == "h1":
+        X_train, X_test, y_train, y_test, dates_train, dates_test, feature_names = load_h1_data()
+        seq_len, horizon = 48, 1
+    else:
+        X_train, X_test, y_train, y_test, dates_train, dates_test, feature_names = load_h12_data()
+        seq_len, horizon = 72, 12
 
-def run_h1(batch_size: int, epochs: int, patience: int, lr: float) -> tuple[dict, TransformerTrainer]:
-    """Train and evaluate Transformer for +1h prediction."""
-    print("=" * 60)
-    print("Transformer +1h")
-    print("=" * 60)
-
-    # Load data
-    X_train, X_test, y_train, y_test, dates_train, dates_test, feature_names = load_h1_data()
-
-    # Split train into train/val (80/20 of train, chronologically)
     val_split = int(len(X_train) * 0.8)
     X_tr, X_va = X_train[:val_split], X_train[val_split:]
     y_tr, y_va = y_train[:val_split], y_train[val_split:]
-    dates_tr = dates_train[:val_split]
     dates_va = dates_train[val_split:]
 
-    seq_len = 48
-    horizon = 1
-
-    # Create sequences
     X_tr_seq, y_tr_seq = create_sequences(X_tr, y_tr, seq_len, horizon)
     X_va_seq, y_va_seq = create_sequences(X_va, y_va, seq_len, horizon)
     X_te_seq, y_te_seq = create_sequences(X_test, y_test, seq_len, horizon)
 
-    # Forecast origin times (datetime of the LAST observation in each sequence)
     forecast_va = dates_va[seq_len - 1 : seq_len - 1 + len(y_va_seq)]
     forecast_te = dates_test[seq_len - 1 : seq_len - 1 + len(y_te_seq)]
 
-    print(f"  Train seqs: {len(X_tr_seq)}, Val seqs: {len(X_va_seq)}, Test seqs: {len(X_te_seq)}")
-    print(f"  Features: {len(feature_names)}, input_dim: {X_tr_seq.shape[2]}")
+    train_loader = DataLoader(TensorDataset(torch.tensor(X_tr_seq, dtype=torch.float32), torch.tensor(y_tr_seq, dtype=torch.float32)), batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(TensorDataset(torch.tensor(X_va_seq, dtype=torch.float32), torch.tensor(y_va_seq, dtype=torch.float32)), batch_size=batch_size, shuffle=False)
+    test_loader = DataLoader(TensorDataset(torch.tensor(X_te_seq, dtype=torch.float32), torch.tensor(y_te_seq, dtype=torch.float32)), batch_size=batch_size, shuffle=False)
 
-    # Create dataloaders
-    train_loader = create_dataloader(X_tr_seq, y_tr_seq, batch_size=batch_size, shuffle=True)
-    val_loader = create_dataloader(X_va_seq, y_va_seq, batch_size=batch_size, shuffle=False)
-    test_loader = create_dataloader(X_te_seq, y_te_seq, batch_size=batch_size, shuffle=False)
-
-    # Build model
     model = TimeSeriesTransformer(
         input_dim=len(feature_names),
         seq_len=seq_len,
@@ -223,302 +128,113 @@ def run_h1(batch_size: int, epochs: int, patience: int, lr: float) -> tuple[dict
         dim_feedforward=128,
         dropout=0.1,
     )
-    print(f"  Model params: {sum(p.numel() for p in model.parameters())}")
-
-    # Train
     trainer = TransformerTrainer(model, lr=lr)
-    t0 = time.time()
-    train_result = trainer.train(
-        train_loader, val_loader, epochs=epochs, patience=patience, verbose=True
-    )
-    train_time = time.time() - t0
-    print(f"  Best epoch: {train_result['best_epoch']}, "
-          f"best val loss: {train_result['best_val_loss']:.4f}")
-    print(f"  Train time: {train_time:.1f}s")
 
-    # Predict
+    t0 = time.time()
+    train_result = trainer.train(train_loader, val_loader, epochs=epochs, patience=patience, verbose=True)
+    train_time = time.time() - t0
+
     y_pred = trainer.predict(test_loader)
     metrics = compute_metrics(y_te_seq, y_pred)
-    print(f"  Test RMSE={metrics['rmse']:.2f}, MAE={metrics['mae']:.2f}, "
-          f"MAPE={metrics['mape']:.1f}%")
 
-    # Save predictions
-    pred_df = make_prediction_csv(
-        forecast_te, y_te_seq, y_pred, horizon=horizon, model_name="Transformer"
-    )
-    pred_path = OUTPUT_DIR / "transformer_predictions_h1.csv"
-    pred_df.to_csv(pred_path, index=False)
-    print(f"  Saved: {pred_path}")
+    pred_df = make_prediction_csv(forecast_te, y_te_seq, y_pred, horizon=horizon, model_name="Transformer")
+    pred_df.to_csv(OUTPUT_DIR / f"transformer_predictions_{task}.csv", index=False)
 
-    # Save validation predictions
     val_pred = trainer.predict(val_loader)
-    val_df = make_prediction_csv(
-        forecast_va, y_va_seq, val_pred, horizon=horizon,
-        model_name="Transformer", split="val"
-    )
-    val_pred_path = OUTPUT_DIR / "transformer_predictions_h1_val.csv"
-    val_df.to_csv(val_pred_path, index=False)
-    print(f"  Saved: {val_pred_path}")
+    val_df = make_prediction_csv(forecast_va, y_va_seq, val_pred, horizon=horizon, model_name="Transformer", split="val")
+    val_df.to_csv(OUTPUT_DIR / f"transformer_predictions_{task}_val.csv", index=False)
 
-    # Save model
-    model_path = OUTPUT_DIR / "transformer_h1.pt"
     torch.save(
         {
             "model_state_dict": model.state_dict(),
             "config": model.config,
             "history": trainer.get_history(),
         },
-        model_path,
+        OUTPUT_DIR / f"transformer_{task}.pt",
     )
-    print(f"  Saved: {model_path}")
 
-    result = {
+    config = {
+        "task": task,
+        "horizon_hours": int(horizon),
+        "seq_len": int(seq_len),
+        "d_model": 64,
+        "nhead": 4,
+        "num_encoder_layers": 3,
+        "dim_feedforward": 128,
+        "dropout": 0.1,
+        "batch_size": int(batch_size),
+        "lr": float(lr),
+        "epochs": int(epochs),
+        "patience": int(patience),
+    }
+    with open(OUTPUT_DIR / f"transformer_{task}_config.json", "w", encoding="utf-8") as f:
+        json.dump(config, f, ensure_ascii=False, indent=2)
+
+    row = {
         "model": "Transformer",
-        "horizon_hours": horizon,
+        "horizon_hours": int(horizon),
         "rmse": metrics["rmse"],
         "mae": metrics["mae"],
         "mape": metrics["mape"],
-        "n_train": len(X_tr_seq),
-        "n_val": len(X_va_seq),
-        "n_test": len(X_te_seq),
-        "best_epoch": train_result["best_epoch"],
-        "best_val_loss": train_result["best_val_loss"],
-        "train_time_s": round(train_time, 1),
-        "model_params": sum(p.numel() for p in model.parameters()),
+        "n_samples": int(metrics["n_samples"]),
+        "notes": f"seq_len={seq_len},best_epoch={train_result['best_epoch']},best_val_loss={train_result['best_val_loss']:.4f},train_time_s={train_time:.1f}",
     }
-    return result, trainer
+    return row, trainer
 
-
-def run_h24(batch_size: int, epochs: int, patience: int, lr: float) -> tuple[dict, TransformerTrainer]:
-    """Train and evaluate Transformer for +24h prediction."""
-    print("=" * 60)
-    print("Transformer +24h")
-    print("=" * 60)
-
-    # Load data
-    X_train, X_test, y_train, y_test, dates_train, dates_test, feature_names = load_h24_data()
-
-    # Split train into train/val (80/20 of train, chronologically)
-    val_split = int(len(X_train) * 0.8)
-    X_tr, X_va = X_train[:val_split], X_train[val_split:]
-    y_tr, y_va = y_train[:val_split], y_train[val_split:]
-    dates_tr = dates_train[:val_split]
-    dates_va = dates_train[val_split:]
-
-    seq_len = 48
-    horizon = 24
-
-    # Create sequences
-    X_tr_seq, y_tr_seq = create_sequences(X_tr, y_tr, seq_len, horizon)
-    X_va_seq, y_va_seq = create_sequences(X_va, y_va, seq_len, horizon)
-    X_te_seq, y_te_seq = create_sequences(X_test, y_test, seq_len, horizon)
-
-    # Forecast origin times (datetime of the LAST observation in each sequence)
-    forecast_va = dates_va[seq_len - 1 : seq_len - 1 + len(y_va_seq)]
-    forecast_te = dates_test[seq_len - 1 : seq_len - 1 + len(y_te_seq)]
-
-    print(f"  Train seqs: {len(X_tr_seq)}, Val seqs: {len(X_va_seq)}, Test seqs: {len(X_te_seq)}")
-    print(f"  Features: {len(feature_names)}, input_dim: {X_tr_seq.shape[2]}")
-
-    # Create dataloaders
-    train_loader = create_dataloader(X_tr_seq, y_tr_seq, batch_size=batch_size, shuffle=True)
-    val_loader = create_dataloader(X_va_seq, y_va_seq, batch_size=batch_size, shuffle=False)
-    test_loader = create_dataloader(X_te_seq, y_te_seq, batch_size=batch_size, shuffle=False)
-
-    # Build model
-    model = TimeSeriesTransformer(
-        input_dim=len(feature_names),
-        seq_len=seq_len,
-        d_model=64,
-        nhead=4,
-        num_encoder_layers=3,
-        dim_feedforward=128,
-        dropout=0.1,
-    )
-    print(f"  Model params: {sum(p.numel() for p in model.parameters())}")
-
-    # Train
-    trainer = TransformerTrainer(model, lr=lr)
-    t0 = time.time()
-    train_result = trainer.train(
-        train_loader, val_loader, epochs=epochs, patience=patience, verbose=True
-    )
-    train_time = time.time() - t0
-    print(f"  Best epoch: {train_result['best_epoch']}, "
-          f"best val loss: {train_result['best_val_loss']:.4f}")
-    print(f"  Train time: {train_time:.1f}s")
-
-    # Predict
-    y_pred = trainer.predict(test_loader)
-    metrics = compute_metrics(y_te_seq, y_pred)
-    print(f"  Test RMSE={metrics['rmse']:.2f}, MAE={metrics['mae']:.2f}, "
-          f"MAPE={metrics['mape']:.1f}%")
-
-    # Save predictions
-    pred_df = make_prediction_csv(
-        forecast_te, y_te_seq, y_pred, horizon=horizon, model_name="Transformer"
-    )
-    pred_path = OUTPUT_DIR / "transformer_predictions_h24.csv"
-    pred_df.to_csv(pred_path, index=False)
-    print(f"  Saved: {pred_path}")
-
-    # Save validation predictions
-    val_pred = trainer.predict(val_loader)
-    val_df = make_prediction_csv(
-        forecast_va, y_va_seq, val_pred, horizon=horizon,
-        model_name="Transformer", split="val"
-    )
-    val_pred_path = OUTPUT_DIR / "transformer_predictions_h24_val.csv"
-    val_df.to_csv(val_pred_path, index=False)
-    print(f"  Saved: {val_pred_path}")
-
-    # Save model
-    model_path = OUTPUT_DIR / "transformer_h24.pt"
-    torch.save(
-        {
-            "model_state_dict": model.state_dict(),
-            "config": model.config,
-            "history": trainer.get_history(),
-        },
-        model_path,
-    )
-    print(f"  Saved: {model_path}")
-
-    result = {
-        "model": "Transformer",
-        "horizon_hours": horizon,
-        "rmse": metrics["rmse"],
-        "mae": metrics["mae"],
-        "mape": metrics["mape"],
-        "n_train": len(X_tr_seq),
-        "n_val": len(X_va_seq),
-        "n_test": len(X_te_seq),
-        "best_epoch": train_result["best_epoch"],
-        "best_val_loss": train_result["best_val_loss"],
-        "train_time_s": round(train_time, 1),
-        "model_params": sum(p.numel() for p in model.parameters()),
-    }
-    return result, trainer
-
-
-# ==============================================================================
-# Save helpers
-# ==============================================================================
 
 def save_metrics(all_rows: list[dict]) -> None:
-    """Save combined metrics CSV."""
     path = OUTPUT_DIR / "transformer_metrics.csv"
     df = pd.DataFrame(all_rows)
-    if "notes" not in df.columns:
-        df["notes"] = ""
-    df = df[[
-        "model", "horizon_hours", "rmse", "mae", "mape",
-        "n_train", "n_val", "n_test",
-        "best_epoch", "best_val_loss", "train_time_s", "model_params", "notes",
-    ]]
+    cols = ["model", "horizon_hours", "rmse", "mae", "mape", "n_samples", "notes"]
+    for c in cols:
+        if c not in df.columns:
+            df[c] = ""
+    df = df[cols]
     df.to_csv(path, index=False)
-    print(f"Metrics saved: {path}")
 
 
-def save_history(all_trainers: list[TransformerTrainer], horizons: list[int]) -> None:
-    """Save training history as JSON."""
+def save_history(all_trainers: list[TransformerTrainer], tasks: list[str]) -> None:
     path = OUTPUT_DIR / "transformer_train_history.json"
-    history_data = {}
-    for trainer, h in zip(all_trainers, horizons):
-        history_data[f"h{h}"] = {
+    history_data = {
+        task: {
             "train_loss": trainer.get_history()["train_loss"],
             "val_loss": trainer.get_history()["val_loss"],
         }
+        for trainer, task in zip(all_trainers, tasks)
+    }
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(history_data, f, indent=2)
-    print(f"History saved: {path}")
+        json.dump(history_data, f, ensure_ascii=False, indent=2)
 
-
-def append_registry(rows: list[dict]) -> None:
-    """Append experiment entries to registry."""
-    path = OUTPUT_DIR / "experiment_registry.csv"
-    now = time.strftime("%Y-%m-%d %H:%M:%S")
-
-    records = []
-    for r in rows:
-        records.append({
-            "experiment_id": f"transformer_h{r['horizon_hours']}_{now.replace(' ', 'T')}",
-            "model": r["model"],
-            "horizon_hours": r["horizon_hours"],
-            "feature_set": "full_20",
-            "train_range": "",
-            "val_range": "",
-            "test_range": "",
-            "params": f"d_model=64,nhead=4,layers=3,dim_ff=128,lr=1e-3,params={r.get('model_params', '')}",
-            "best_score": r.get("best_val_loss", ""),
-            "run_time": r.get("train_time_s", ""),
-            "status": "done",
-            "author": "auto",
-            "notes": f"RMSE={r['rmse']:.2f}",
-        })
-
-    df_new = pd.DataFrame(records)
-    if path.exists():
-        df_old = pd.read_csv(path)
-        df_new = pd.concat([df_old, df_new], ignore_index=True)
-    df_new.to_csv(path, index=False)
-    print(f"Registry updated: {path}")
-
-
-# ==============================================================================
-# Main
-# ==============================================================================
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train Transformer for hourly PM2.5")
-    parser.add_argument(
-        "--task", default="both", choices=["h1", "h24", "both"],
-        help="Prediction horizon task",
-    )
-    parser.add_argument("--epochs", type=int, default=100, help="Max training epochs")
-    parser.add_argument("--patience", type=int, default=15, help="Early stopping patience")
-    parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE, help="Batch size")
-    parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
+    parser.add_argument("--task", default="both", choices=["h1", "h12", "both"])
+    parser.add_argument("--epochs", type=int, default=100)
+    parser.add_argument("--patience", type=int, default=15)
+    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--lr", type=float, default=1e-3)
     args = parser.parse_args()
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     all_rows: list[dict] = []
     all_trainers: list[TransformerTrainer] = []
-    all_horizons: list[int] = []
+    all_tasks: list[str] = []
 
     if args.task in ("h1", "both"):
-        r, trainer = run_h1(
-            batch_size=args.batch_size,
-            epochs=args.epochs,
-            patience=args.patience,
-            lr=args.lr,
-        )
+        r, trainer = _run("h1", args.batch_size, args.epochs, args.patience, args.lr)
         all_rows.append(r)
         all_trainers.append(trainer)
-        all_horizons.append(1)
+        all_tasks.append("h1")
 
-    if args.task in ("h24", "both"):
-        r, trainer = run_h24(
-            batch_size=args.batch_size,
-            epochs=args.epochs,
-            patience=args.patience,
-            lr=args.lr,
-        )
+    if args.task in ("h12", "both"):
+        r, trainer = _run("h12", args.batch_size, args.epochs, args.patience, args.lr)
         all_rows.append(r)
         all_trainers.append(trainer)
-        all_horizons.append(24)
+        all_tasks.append("h12")
 
     save_metrics(all_rows)
-    save_history(all_trainers, all_horizons)
-    append_registry(all_rows)
-
-    print("\n" + "=" * 60)
-    print("Transformer Summary")
-    print("=" * 60)
-    for r in all_rows:
-        print(f"  +{r['horizon_hours']}h: RMSE={r['rmse']:.2f}, "
-              f"MAE={r['mae']:.2f}, MAPE={r['mape']:.1f}%")
+    save_history(all_trainers, all_tasks)
 
 
 if __name__ == "__main__":

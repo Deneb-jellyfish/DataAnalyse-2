@@ -1,0 +1,11 @@
+model,horizon_hours,rmse,mae,mape,n_samples,notes
+ARIMA,1,9.01235920777698,4.917314398307207,10.779072744470382,6989,"order=(7, 1, 3),seasonal=(0, 0, 0, 0)"
+ARIMA,12,24.077605257298195,18.292333713738763,66.17354694483662,6978,"order=(7, 1, 3),seasonal=(0, 0, 0, 0)"
+Prophet,1,,,,0,blocked:prophet_import_failed:ModuleNotFoundError
+Prophet,12,,,,0,blocked:prophet_import_failed:ModuleNotFoundError
+XGBoost,1,8.647462309324524,4.81179530198789,10.129188205170257,6955,"tuned=True,stage=first,best_iteration=312,train_time_s=0.9"
+XGBoost,12,45.55007391289043,32.03177740614015,114.62426886866616,6953,"tuned=True,stage=second,best_iteration=452,train_time_s=1.0"
+LSTM,1,8.922075551646097,5.084760486812103,10.914719985693894,6907,"seq_len=48,best_val_loss=83.3281,train_time_s=1527.6"
+LSTM,12,55.67401521654625,38.32218560045617,96.69857368463462,6872,"seq_len=72,best_val_loss=4143.9038,train_time_s=268.3"
+Transformer,1,8.878834409776834,5.18133518839773,11.265263224810164,6907,"seq_len=48,best_epoch=15,best_val_loss=81.4915,train_time_s=493.2"
+Transformer,12,47.94058980239468,33.13025707832177,111.60319208422,6872,"seq_len=72,best_epoch=7,best_val_loss=2876.5099,train_time_s=650.6"

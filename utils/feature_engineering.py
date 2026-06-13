@@ -127,55 +127,82 @@ def build_feature_frame(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
 
 
 def build_hourly_feature_frame(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
-    """Construct model features from unified Beijing hourly data."""
+    """Construct 48-dim hourly features for h1/h12 PM2.5 prediction."""
     frame = df.copy()
     frame["datetime"] = pd.to_datetime(frame["datetime"])
     frame = frame.sort_values("datetime").reset_index(drop=True)
 
+    # Ensure numeric columns are available and stable
+    for col in ["pm25", "temp", "pres", "dewp", "humidity", "wind_speed", "precipitation"]:
+        frame[col] = pd.to_numeric(frame[col], errors="coerce")
+
+    # Core lag features
     frame["pm25_lag1"] = frame["pm25"].shift(1)
     frame["pm25_lag3"] = frame["pm25"].shift(3)
+    frame["pm25_lag6"] = frame["pm25"].shift(6)
+    frame["pm25_lag12"] = frame["pm25"].shift(12)
+    frame["pm25_lag18"] = frame["pm25"].shift(18)
     frame["pm25_lag24"] = frame["pm25"].shift(24)
+    frame["pm25_lag36"] = frame["pm25"].shift(36)
+    frame["pm25_lag48"] = frame["pm25"].shift(48)
+
+    # Rolling statistics (past-only)
+    frame["pm25_roll_mean_6"] = frame["pm25"].shift(1).rolling(6).mean()
+    frame["pm25_roll_mean_12"] = frame["pm25"].shift(1).rolling(12).mean()
     frame["pm25_roll_mean_24"] = frame["pm25"].shift(1).rolling(24).mean()
     frame["pm25_roll_mean_168"] = frame["pm25"].shift(1).rolling(168).mean()
+    frame["pm25_roll_std_6"] = frame["pm25"].shift(1).rolling(6).std()
+    frame["pm25_roll_std_12"] = frame["pm25"].shift(1).rolling(12).std()
     frame["pm25_roll_std_24"] = frame["pm25"].shift(1).rolling(24).std()
     frame["pm25_roll_std_168"] = frame["pm25"].shift(1).rolling(168).std()
 
-    frame["hour_sin"] = np.sin(2 * np.pi * frame["datetime"].dt.hour / 24)
-    frame["hour_cos"] = np.cos(2 * np.pi * frame["datetime"].dt.hour / 24)
+    # Trend / difference features
+    frame["pm25_diff_1"] = frame["pm25"] - frame["pm25_lag1"]
+    frame["pm25_diff_3"] = frame["pm25"] - frame["pm25_lag3"]
+    frame["pm25_diff_6"] = frame["pm25"] - frame["pm25_lag6"]
+    frame["pm25_diff_12"] = frame["pm25"] - frame["pm25_lag12"]
+
+    # Time / calendar features
+    hour = frame["datetime"].dt.hour
+    frame["hour_sin"] = np.sin(2 * np.pi * hour / 24)
+    frame["hour_cos"] = np.cos(2 * np.pi * hour / 24)
     frame["month_sin"] = np.sin(2 * np.pi * frame["datetime"].dt.month / 12)
     frame["month_cos"] = np.cos(2 * np.pi * frame["datetime"].dt.month / 12)
     frame["weekday"] = frame["datetime"].dt.weekday
+    frame["is_weekend"] = frame["weekday"].isin([5, 6]).astype(int)
     frame["is_holiday"] = frame["datetime"].dt.date.map(_is_holiday)
+    frame["is_daytime"] = hour.between(6, 17).astype(int)
+    frame["is_rush_hour"] = hour.isin([7, 8, 9, 17, 18, 19]).astype(int)
 
-    humidity = frame["humidity"].fillna(0.0)
-    temp = frame["temp"].fillna(0.0)
-    wind_speed = frame["wind_speed"].fillna(0.0)
+    # Meteorological raw + directional transform
     wind_dir_rad = frame["wind_dir"].map(encode_wind_dir)
+    frame["wind_dir_sin"] = np.sin(wind_dir_rad)
+    frame["wind_dir_cos"] = np.cos(wind_dir_rad)
+    frame["precipitation_flag"] = (frame["precipitation"].fillna(0.0) > 0).astype(int)
+    frame["dewp_temp_gap"] = frame["temp"] - frame["dewp"]
 
-    frame["temp_x_humidity"] = temp * humidity
-    frame["wind_speed_x_wind_dir_sin"] = wind_speed * np.sin(wind_dir_rad)
+    # Meteorological trend features
+    frame["temp_diff_1"] = frame["temp"] - frame["temp"].shift(1)
+    frame["temp_diff_3"] = frame["temp"] - frame["temp"].shift(3)
+    frame["pres_diff_1"] = frame["pres"] - frame["pres"].shift(1)
+    frame["pres_diff_3"] = frame["pres"] - frame["pres"].shift(3)
+    frame["wind_speed_diff_1"] = frame["wind_speed"] - frame["wind_speed"].shift(1)
+    frame["wind_speed_diff_3"] = frame["wind_speed"] - frame["wind_speed"].shift(3)
+
+    # Interaction features
+    frame["temp_x_humidity"] = frame["temp"].fillna(0.0) * frame["humidity"].fillna(0.0)
+    frame["wind_speed_x_wind_dir_sin"] = frame["wind_speed"].fillna(0.0) * frame["wind_dir_sin"]
+    frame["wind_speed_x_pm25_lag1"] = frame["wind_speed"].fillna(0.0) * frame["pm25_lag1"].fillna(0.0)
 
     feature_columns = [
-        "pm25_lag1",
-        "pm25_lag3",
-        "pm25_lag24",
-        "pm25_roll_mean_24",
-        "pm25_roll_mean_168",
-        "pm25_roll_std_24",
-        "pm25_roll_std_168",
-        "hour_sin",
-        "hour_cos",
-        "month_sin",
-        "month_cos",
-        "weekday",
-        "is_holiday",
-        "temp",
-        "pres",
-        "dewp",
-        "wind_speed",
-        "precipitation",
-        "temp_x_humidity",
-        "wind_speed_x_wind_dir_sin",
+        "pm25_lag1", "pm25_lag3", "pm25_lag6", "pm25_lag12", "pm25_lag18", "pm25_lag24", "pm25_lag36", "pm25_lag48",
+        "pm25_roll_mean_6", "pm25_roll_mean_12", "pm25_roll_mean_24", "pm25_roll_mean_168",
+        "pm25_roll_std_6", "pm25_roll_std_12", "pm25_roll_std_24", "pm25_roll_std_168",
+        "pm25_diff_1", "pm25_diff_3", "pm25_diff_6", "pm25_diff_12",
+        "hour_sin", "hour_cos", "month_sin", "month_cos", "weekday", "is_weekend", "is_holiday", "is_daytime", "is_rush_hour",
+        "temp", "pres", "dewp", "humidity", "wind_speed", "precipitation", "wind_dir_sin", "wind_dir_cos", "precipitation_flag", "dewp_temp_gap",
+        "temp_diff_1", "temp_diff_3", "pres_diff_1", "pres_diff_3", "wind_speed_diff_1", "wind_speed_diff_3",
+        "temp_x_humidity", "wind_speed_x_wind_dir_sin", "wind_speed_x_pm25_lag1",
     ]
     return frame, feature_columns
 
@@ -287,24 +314,52 @@ def write_feature_doc(metadata: dict[str, Any]) -> None:
             "|--------|------|",
             "| pm25_lag1 | 前 1 小时 PM2.5 |",
             "| pm25_lag3 | 前 3 小时 PM2.5 |",
+            "| pm25_lag6 | 前 6 小时 PM2.5 |",
+            "| pm25_lag12 | 前 12 小时 PM2.5 |",
+            "| pm25_lag18 | 前 18 小时 PM2.5 |",
             "| pm25_lag24 | 前 24 小时 PM2.5 |",
+            "| pm25_lag36 | 前 36 小时 PM2.5 |",
+            "| pm25_lag48 | 前 48 小时 PM2.5 |",
+            "| pm25_roll_mean_6 | 6 小时滚动均值（滞后 1 小时） |",
+            "| pm25_roll_mean_12 | 12 小时滚动均值（滞后 1 小时） |",
             "| pm25_roll_mean_24 | 24 小时滚动均值（滞后 1 小时） |",
             "| pm25_roll_mean_168 | 168 小时（7 天）滚动均值（滞后 1 小时） |",
+            "| pm25_roll_std_6 | 6 小时滚动标准差（滞后 1 小时） |",
+            "| pm25_roll_std_12 | 12 小时滚动标准差（滞后 1 小时） |",
             "| pm25_roll_std_24 | 24 小时滚动标准差（滞后 1 小时） |",
             "| pm25_roll_std_168 | 168 小时滚动标准差（滞后 1 小时） |",
+            "| pm25_diff_1 | 当前 PM2.5 相对 1 小时前变化 |",
+            "| pm25_diff_3 | 当前 PM2.5 相对 3 小时前变化 |",
+            "| pm25_diff_6 | 当前 PM2.5 相对 6 小时前变化 |",
+            "| pm25_diff_12 | 当前 PM2.5 相对 12 小时前变化 |",
             "| hour_sin | 小时正弦周期编码 |",
             "| hour_cos | 小时余弦周期编码 |",
             "| month_sin | 月份正弦周期编码 |",
             "| month_cos | 月份余弦周期编码 |",
             "| weekday | 星期几（0=周一） |",
+            "| is_weekend | 是否周末（0/1） |",
             "| is_holiday | 中国法定节假日标记（0/1） |",
+            "| is_daytime | 是否白天（06:00-17:59） |",
+            "| is_rush_hour | 是否通勤高峰（7-9,17-19） |",
             "| temp | 小时温度（℃） |",
             "| pres | 小时气压（hPa） |",
             "| dewp | 小时露点（℃） |",
+            "| humidity | 小时湿度（%） |",
             "| wind_speed | 小时风速（m/s） |",
             "| precipitation | 小时降水量（mm） |",
+            "| wind_dir_sin | 风向正弦编码 |",
+            "| wind_dir_cos | 风向余弦编码 |",
+            "| precipitation_flag | 是否有降水（0/1） |",
+            "| dewp_temp_gap | 温度与露点差（temp-dewp） |",
+            "| temp_diff_1 | 温度相对 1 小时前变化 |",
+            "| temp_diff_3 | 温度相对 3 小时前变化 |",
+            "| pres_diff_1 | 气压相对 1 小时前变化 |",
+            "| pres_diff_3 | 气压相对 3 小时前变化 |",
+            "| wind_speed_diff_1 | 风速相对 1 小时前变化 |",
+            "| wind_speed_diff_3 | 风速相对 3 小时前变化 |",
             "| temp_x_humidity | 温度 × 湿度交互项 |",
             "| wind_speed_x_wind_dir_sin | 风速 × sin(风向角) 交互项 |",
+            "| wind_speed_x_pm25_lag1 | 风速 × PM2.5(t-1) 交互项 |",
             "",
             "## 矩阵维度",
             "",

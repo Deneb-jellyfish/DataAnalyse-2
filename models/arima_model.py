@@ -1,4 +1,4 @@
-"""ARIMA model for hourly PM2.5 prediction (+1h and +24h).
+"""ARIMA model for hourly PM2.5 prediction (+1h and +12h).
 
 Uses statsmodels.tsa.arima.model.ARIMA (not pmdarima).
 """
@@ -147,16 +147,16 @@ class ARIMAHourlyModel:
         return predictions
 
     # ------------------------------------------------------------------
-    # +24h 24-step-ahead forecast
+    # +12h 12-step-ahead forecast
     # ------------------------------------------------------------------
-    def predict_h24(self, test_series: np.ndarray) -> np.ndarray:
-        """24-step-ahead forecast on test series.
+    def predict_h12(self, test_series: np.ndarray) -> np.ndarray:
+        """12-step-ahead forecast on test series.
 
         At each forecast origin i:
-          - forecast(steps=24) and take the 24th value as the +24h prediction
+          - forecast(steps=12) and take the 12th value as the +12h prediction
           - append the TRUE observation at origin i, then advance
 
-        The last 23 entries cannot receive a +24h prediction (would require
+        The last 11 entries cannot receive a +12h prediction (would require
         future data), so they are set to NaN.
 
         Parameters
@@ -165,7 +165,7 @@ class ARIMAHourlyModel:
 
         Returns
         -------
-        predictions : 1D array of length len(test_series).  The last 23
+        predictions : 1D array of length len(test_series).  The last 11
             positions are NaN.
         """
         if self._results is None:
@@ -176,7 +176,7 @@ class ARIMAHourlyModel:
         predictions = np.full(n_test, np.nan, dtype=np.float64)
 
         results = self._results
-        max_i = n_test - 23  # Cannot predict +24h beyond this
+        max_i = n_test - 11  # Cannot predict +12h beyond this
 
         for i in range(max_i):
             true_val = test_series[i]
@@ -194,7 +194,7 @@ class ARIMAHourlyModel:
             try:
                 with warnings.catch_warnings():
                     warnings.filterwarnings("ignore")
-                    fc = results.forecast(steps=24)
+                    fc = results.forecast(steps=12)
                 predictions[i] = float(fc[-1])
             except Exception:
                 predictions[i] = np.nan
@@ -207,7 +207,7 @@ class ARIMAHourlyModel:
             except Exception:
                 pass
 
-        # Entries [n_test-23 : n_test] remain NaN
+        # Entries [n_test-11 : n_test] remain NaN
         return predictions
 
     # ------------------------------------------------------------------
@@ -218,10 +218,10 @@ class ARIMAHourlyModel:
         test_series: np.ndarray,
         horizon: int = 1,
     ) -> np.ndarray:
-        """Dispatch to predict_h1 or predict_h24 based on horizon."""
+        """Dispatch to predict_h1 or predict_h12 based on horizon."""
         if horizon == 1:
             return self.predict_h1(test_series)
-        elif horizon == 24:
-            return self.predict_h24(test_series)
+        elif horizon == 12:
+            return self.predict_h12(test_series)
         else:
-            raise ValueError(f"horizon must be 1 or 24, got {horizon}")
+            raise ValueError(f"horizon must be 1 or 12, got {horizon}")

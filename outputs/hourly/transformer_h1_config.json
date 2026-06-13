@@ -1,0 +1,14 @@
+{
+  "task": "h1",
+  "horizon_hours": 1,
+  "seq_len": 48,
+  "d_model": 64,
+  "nhead": 4,
+  "num_encoder_layers": 3,
+  "dim_feedforward": 128,
+  "dropout": 0.1,
+  "batch_size": 64,
+  "lr": 0.001,
+  "epochs": 100,
+  "patience": 15
+}

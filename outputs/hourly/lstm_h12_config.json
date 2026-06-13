@@ -1,0 +1,12 @@
+{
+  "task": "h12",
+  "horizon_hours": 12,
+  "seq_len": 72,
+  "hidden_dim": 64,
+  "num_layers": 2,
+  "dropout": 0.2,
+  "lr": 0.001,
+  "batch_size": 64,
+  "patience": 12,
+  "epochs": 100
+}
