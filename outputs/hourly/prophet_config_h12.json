@@ -1,6 +1,0 @@
-{
-  "task": "h12",
-  "horizon_hours": 12,
-  "status": "blocked",
-  "reason": "prophet_import_failed:ModuleNotFoundError"
-}

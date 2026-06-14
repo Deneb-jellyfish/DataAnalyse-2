@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import math
 import copy
+from datetime import datetime
 from typing import Optional
 
 import numpy as np
@@ -78,11 +79,13 @@ class TimeSeriesTransformer(nn.Module):
         num_encoder_layers: int = 3,
         dim_feedforward: int = 128,
         dropout: float = 0.1,
+        output_dim: int = 1,
     ):
         super().__init__()
         self.input_dim = input_dim
         self.seq_len = seq_len
         self.d_model = d_model
+        self.output_dim = output_dim
 
         # 1. Input projection
         self.input_projection = nn.Linear(input_dim, d_model)
@@ -106,7 +109,7 @@ class TimeSeriesTransformer(nn.Module):
         )
 
         # 4. Output head
-        self.output_head = nn.Linear(d_model, 1)
+        self.output_head = nn.Linear(d_model, output_dim)
 
         # Store config for serialization
         self._config = {
@@ -117,6 +120,7 @@ class TimeSeriesTransformer(nn.Module):
             "num_encoder_layers": num_encoder_layers,
             "dim_feedforward": dim_feedforward,
             "dropout": dropout,
+            "output_dim": output_dim,
         }
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -126,7 +130,7 @@ class TimeSeriesTransformer(nn.Module):
             x: (batch, seq_len, input_dim)
 
         Returns:
-            (batch, 1) - scalar predictions per sample
+            (batch,) when ``output_dim == 1`` else ``(batch, output_dim)``
         """
         # Project: (batch, seq_len, input_dim) -> (batch, seq_len, d_model)
         x = self.input_projection(x)
@@ -141,8 +145,9 @@ class TimeSeriesTransformer(nn.Module):
         x = x.mean(dim=1)
 
         # Output head: (batch, 1)
-        x = self.output_head(x).squeeze(-1)
-
+        x = self.output_head(x)
+        if self.output_dim == 1:
+            return x.squeeze(-1)
         return x
 
     @property
@@ -179,6 +184,10 @@ class TransformerTrainer:
             "val_loss": [],
         }
 
+    def _log(self, message: str) -> None:
+        """Print lightweight timestamped training logs."""
+        print(f"[Transformer {datetime.now():%H:%M:%S}] {message}", flush=True)
+
     def train(
         self,
         train_loader: torch.utils.data.DataLoader,
@@ -196,6 +205,13 @@ class TransformerTrainer:
         best_model_state: Optional[dict] = None
         best_epoch = 0
         patience_counter = 0
+
+        if verbose:
+            self._log(
+                f"start training: epochs={epochs}, patience={patience}, "
+                f"train_batches={len(train_loader)}, val_batches={len(val_loader)}, "
+                f"device={self.device}"
+            )
 
         for epoch in range(1, epochs + 1):
             # --- Training ---
@@ -231,9 +247,9 @@ class TransformerTrainer:
             self.history["val_loss"].append(avg_val_loss)
 
             if verbose and (epoch % 10 == 0 or epoch == 1):
-                print(
-                    f"  Epoch {epoch:3d}/{epochs}  "
-                    f"train_loss={avg_train_loss:.4f}  "
+                self._log(
+                    f"epoch {epoch:3d}/{epochs} "
+                    f"train_loss={avg_train_loss:.4f} "
                     f"val_loss={avg_val_loss:.4f}"
                 )
 
@@ -243,17 +259,29 @@ class TransformerTrainer:
                 best_epoch = epoch
                 patience_counter = 0
                 best_model_state = copy.deepcopy(self.model.state_dict())
+                if verbose:
+                    self._log(
+                        f"new best: epoch={epoch}, val_loss={avg_val_loss:.4f}"
+                    )
             else:
                 patience_counter += 1
 
             if patience_counter >= patience:
                 if verbose:
-                    print(f"  Early stopping at epoch {epoch}, best epoch={best_epoch}")
+                    self._log(
+                        f"early stopping at epoch={epoch}, best_epoch={best_epoch}"
+                    )
                 break
 
         # Restore best model
         if best_model_state is not None:
             self.model.load_state_dict(best_model_state)
+
+        if verbose:
+            self._log(
+                f"training complete: best_epoch={best_epoch}, "
+                f"best_val_loss={best_val_loss:.4f}, epochs_run={epoch}"
+            )
 
         result = {
             "best_epoch": best_epoch,
@@ -265,6 +293,7 @@ class TransformerTrainer:
 
     def predict(self, loader: torch.utils.data.DataLoader) -> np.ndarray:
         """Run inference and return predictions as a 1-D NumPy array."""
+        self._log(f"start prediction: batches={len(loader)}")
         self.model.eval()
         all_preds: list[np.ndarray] = []
         with torch.no_grad():
@@ -274,7 +303,10 @@ class TransformerTrainer:
                 all_preds.append(preds.cpu().numpy())
 
         if all_preds:
-            return np.concatenate(all_preds)
+            predictions = np.concatenate(all_preds)
+            self._log(f"prediction complete: n_outputs={len(predictions)}")
+            return predictions
+        self._log("prediction complete: n_outputs=0")
         return np.array([])
 
     def get_history(self) -> dict[str, list[float]]:

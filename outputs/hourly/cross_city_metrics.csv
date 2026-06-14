@@ -1,3 +1,0 @@
-model,horizon_hours,train_city,test_city,rmse,mae,mape,n_samples,notes
-XGBoost,1,Beijing,Shanghai,15.456396486407131,8.553191828355015,18.404712831791162,17602,trained_on_beijing_tested_on_shanghai
-XGBoost,12,Beijing,Shanghai,40.01409921044245,25.327959767468776,59.311231040149714,17591,trained_on_beijing_tested_on_shanghai

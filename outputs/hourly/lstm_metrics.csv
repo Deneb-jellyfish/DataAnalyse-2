@@ -1,3 +1,0 @@
-model,horizon_hours,rmse,mae,mape,n_samples,notes
-LSTM,1,8.922075551646097,5.084760486812103,10.914719985693894,6907,"seq_len=48,best_val_loss=83.3281,train_time_s=1527.6"
-LSTM,12,55.67401521654625,38.32218560045617,96.69857368463462,6872,"seq_len=72,best_val_loss=4143.9038,train_time_s=268.3"

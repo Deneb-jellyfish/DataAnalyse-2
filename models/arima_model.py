@@ -1,10 +1,11 @@
-"""ARIMA model for hourly PM2.5 prediction (+1h and +12h).
+"""ARIMA model for hourly PM2.5 prediction.
 
 Uses statsmodels.tsa.arima.model.ARIMA (not pmdarima).
 """
 
 from __future__ import annotations
 
+from datetime import datetime
 import warnings
 from typing import Optional
 
@@ -18,8 +19,8 @@ with warnings.catch_warnings():
 class ARIMAHourlyModel:
     """ARIMA wrapped for hourly PM2.5 prediction.
 
-    Supports rolling one-step-ahead forecasting (+1h) and 24-step-ahead
-    forecasting (+24h) using statsmodels ARIMA.
+    Supports rolling one-step-ahead and rolling multi-step forecasting
+    using statsmodels ARIMA.
     """
 
     def __init__(
@@ -41,6 +42,10 @@ class ARIMAHourlyModel:
         self._results = None
         self._train_length: int = 0
 
+    def _log(self, message: str) -> None:
+        """Print a lightweight timestamped progress message."""
+        print(f"[ARIMA {datetime.now():%H:%M:%S}] {message}", flush=True)
+
     # ------------------------------------------------------------------
     # Fit
     # ------------------------------------------------------------------
@@ -61,6 +66,10 @@ class ARIMAHourlyModel:
             series = valid.copy()
 
         self._train_length = len(series)
+        self._log(
+            f"start fit: n_train={self._train_length}, "
+            f"order={self.order}, seasonal_order={self.seasonal_order}"
+        )
 
         # If all seasonal terms are zero, skip seasonal_order to avoid
         # potential issues with s=0 in older statsmodels versions.
@@ -86,6 +95,10 @@ class ARIMAHourlyModel:
                 )
             self._results = model.fit(method_kwargs={"maxiter": 500})
 
+        self._log(
+            f"fit complete: aic={self._results.aic:.2f}, bic={self._results.bic:.2f}"
+        )
+
         return {
             "n_train": self._train_length,
             "aic": float(self._results.aic),
@@ -97,7 +110,7 @@ class ARIMAHourlyModel:
     # ------------------------------------------------------------------
     # +1h rolling one-step-ahead forecast
     # ------------------------------------------------------------------
-    def predict_h1(self, test_series: np.ndarray) -> np.ndarray:
+    def predict_h1(self, test_series: np.ndarray, log_every: Optional[int] = None) -> np.ndarray:
         """Rolling one-step-ahead forecast on test series.
 
         At each step:
@@ -118,6 +131,8 @@ class ARIMAHourlyModel:
         test_series = np.asarray(test_series, dtype=np.float64)
         n_test = len(test_series)
         predictions = np.full(n_test, np.nan, dtype=np.float64)
+        log_every = log_every or max(1, n_test // 10)
+        self._log(f"start rolling h1 forecast: n_test={n_test}, log_every={log_every}")
 
         results = self._results
 
@@ -125,6 +140,8 @@ class ARIMAHourlyModel:
             true_val = test_series[i]
             if np.isnan(true_val):
                 predictions[i] = np.nan
+                if (i + 1) % log_every == 0 or (i + 1) == n_test:
+                    self._log(f"h1 progress: {i + 1}/{n_test} ({(i + 1) / n_test:.1%})")
                 continue
 
             try:
@@ -144,20 +161,30 @@ class ARIMAHourlyModel:
                 # If append fails, keep using the old results
                 pass
 
+            if (i + 1) % log_every == 0 or (i + 1) == n_test:
+                self._log(f"h1 progress: {i + 1}/{n_test} ({(i + 1) / n_test:.1%})")
+
+        self._log("h1 forecast complete")
+
         return predictions
 
     # ------------------------------------------------------------------
-    # +12h 12-step-ahead forecast
+    # Rolling multi-step forecast
     # ------------------------------------------------------------------
-    def predict_h12(self, test_series: np.ndarray) -> np.ndarray:
-        """12-step-ahead forecast on test series.
+    def predict_steps(
+        self,
+        test_series: np.ndarray,
+        steps: int,
+        log_every: Optional[int] = None,
+    ) -> np.ndarray:
+        """Rolling multi-step forecast on test series.
 
         At each forecast origin i:
-          - forecast(steps=12) and take the 12th value as the +12h prediction
+          - forecast(steps=steps) and keep all forecast steps
           - append the TRUE observation at origin i, then advance
 
-        The last 11 entries cannot receive a +12h prediction (would require
-        future data), so they are set to NaN.
+        Later horizons near the test-set tail cannot be evaluated, so they
+        remain NaN.
 
         Parameters
         ----------
@@ -165,39 +192,47 @@ class ARIMAHourlyModel:
 
         Returns
         -------
-        predictions : 1D array of length len(test_series).  The last 11
-            positions are NaN.
+        predictions : 2D array of shape ``(len(test_series), steps)``.
         """
         if self._results is None:
             raise RuntimeError("Model not fitted. Call fit() first.")
+        if steps < 1:
+            raise ValueError("steps must be at least 1")
 
         test_series = np.asarray(test_series, dtype=np.float64)
         n_test = len(test_series)
-        predictions = np.full(n_test, np.nan, dtype=np.float64)
+        predictions = np.full((n_test, steps), np.nan, dtype=np.float64)
 
         results = self._results
-        max_i = n_test - 11  # Cannot predict +12h beyond this
+        max_i = n_test - steps + 1
+        log_every = log_every or max(1, max_i // 10)
+        self._log(
+            f"start rolling seq forecast: n_test={n_test}, steps={steps}, "
+            f"forecast_origins={max_i}, log_every={log_every}"
+        )
 
         for i in range(max_i):
             true_val = test_series[i]
             if np.isnan(true_val):
-                predictions[i] = np.nan
-                # Still need to advance the model -- use naive carry-forward
                 try:
                     with warnings.catch_warnings():
                         warnings.filterwarnings("ignore")
                         results = results.append([np.nan_to_num(true_val, nan=0.0)], refit=False)
                 except Exception:
                     pass
+                if (i + 1) % log_every == 0 or (i + 1) == max_i:
+                    self._log(
+                        f"seq{steps} progress: {i + 1}/{max_i} ({(i + 1) / max_i:.1%})"
+                    )
                 continue
 
             try:
                 with warnings.catch_warnings():
                     warnings.filterwarnings("ignore")
-                    fc = results.forecast(steps=12)
-                predictions[i] = float(fc[-1])
+                    fc = results.forecast(steps=steps)
+                predictions[i, :steps] = np.asarray(fc, dtype=np.float64)
             except Exception:
-                predictions[i] = np.nan
+                predictions[i, :steps] = np.nan
 
             # Append the true observation at origin i
             try:
@@ -207,8 +242,16 @@ class ARIMAHourlyModel:
             except Exception:
                 pass
 
-        # Entries [n_test-11 : n_test] remain NaN
+            if (i + 1) % log_every == 0 or (i + 1) == max_i:
+                self._log(f"seq{steps} progress: {i + 1}/{max_i} ({(i + 1) / max_i:.1%})")
+
+        self._log(f"seq{steps} forecast complete")
+
         return predictions
+
+    def predict_h12(self, test_series: np.ndarray) -> np.ndarray:
+        """Compatibility wrapper that returns only the +12h step."""
+        return self.predict_steps(test_series, steps=12)[:, -1]
 
     # ------------------------------------------------------------------
     # Convenience: full evaluation
@@ -221,7 +264,6 @@ class ARIMAHourlyModel:
         """Dispatch to predict_h1 or predict_h12 based on horizon."""
         if horizon == 1:
             return self.predict_h1(test_series)
-        elif horizon == 12:
-            return self.predict_h12(test_series)
-        else:
-            raise ValueError(f"horizon must be 1 or 12, got {horizon}")
+        elif horizon > 1:
+            return self.predict_steps(test_series, steps=horizon)[:, horizon - 1]
+        raise ValueError(f"horizon must be a positive integer, got {horizon}")

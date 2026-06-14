@@ -1,10 +1,17 @@
 {
-  "task": "h1",
-  "horizon_hours": 1,
+  "task": "seq6",
+  "horizons": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6
+  ],
   "daily_seasonality": true,
   "weekly_seasonality": true,
   "yearly_seasonality": true,
   "fit_time_s": 9.8,
-  "pred_time_s": 2.0,
+  "pred_time_s": 11.4,
   "status": "done"
 }

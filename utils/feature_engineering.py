@@ -127,7 +127,7 @@ def build_feature_frame(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
 
 
 def build_hourly_feature_frame(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
-    """Construct 48-dim hourly features for h1/h12 PM2.5 prediction."""
+    """Construct 48-dim hourly features tuned for h1/h6 PM2.5 prediction."""
     frame = df.copy()
     frame["datetime"] = pd.to_datetime(frame["datetime"])
     frame = frame.sort_values("datetime").reset_index(drop=True)
@@ -138,29 +138,29 @@ def build_hourly_feature_frame(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str
 
     # Core lag features
     frame["pm25_lag1"] = frame["pm25"].shift(1)
+    frame["pm25_lag2"] = frame["pm25"].shift(2)
     frame["pm25_lag3"] = frame["pm25"].shift(3)
+    frame["pm25_lag4"] = frame["pm25"].shift(4)
     frame["pm25_lag6"] = frame["pm25"].shift(6)
+    frame["pm25_lag8"] = frame["pm25"].shift(8)
     frame["pm25_lag12"] = frame["pm25"].shift(12)
-    frame["pm25_lag18"] = frame["pm25"].shift(18)
     frame["pm25_lag24"] = frame["pm25"].shift(24)
-    frame["pm25_lag36"] = frame["pm25"].shift(36)
-    frame["pm25_lag48"] = frame["pm25"].shift(48)
 
     # Rolling statistics (past-only)
+    frame["pm25_roll_mean_3"] = frame["pm25"].shift(1).rolling(3).mean()
     frame["pm25_roll_mean_6"] = frame["pm25"].shift(1).rolling(6).mean()
     frame["pm25_roll_mean_12"] = frame["pm25"].shift(1).rolling(12).mean()
     frame["pm25_roll_mean_24"] = frame["pm25"].shift(1).rolling(24).mean()
-    frame["pm25_roll_mean_168"] = frame["pm25"].shift(1).rolling(168).mean()
+    frame["pm25_roll_std_3"] = frame["pm25"].shift(1).rolling(3).std()
     frame["pm25_roll_std_6"] = frame["pm25"].shift(1).rolling(6).std()
     frame["pm25_roll_std_12"] = frame["pm25"].shift(1).rolling(12).std()
     frame["pm25_roll_std_24"] = frame["pm25"].shift(1).rolling(24).std()
-    frame["pm25_roll_std_168"] = frame["pm25"].shift(1).rolling(168).std()
 
     # Trend / difference features
     frame["pm25_diff_1"] = frame["pm25"] - frame["pm25_lag1"]
+    frame["pm25_diff_2"] = frame["pm25"] - frame["pm25_lag2"]
     frame["pm25_diff_3"] = frame["pm25"] - frame["pm25_lag3"]
     frame["pm25_diff_6"] = frame["pm25"] - frame["pm25_lag6"]
-    frame["pm25_diff_12"] = frame["pm25"] - frame["pm25_lag12"]
 
     # Time / calendar features
     hour = frame["datetime"].dt.hour
@@ -183,11 +183,14 @@ def build_hourly_feature_frame(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str
 
     # Meteorological trend features
     frame["temp_diff_1"] = frame["temp"] - frame["temp"].shift(1)
-    frame["temp_diff_3"] = frame["temp"] - frame["temp"].shift(3)
+    frame["temp_diff_2"] = frame["temp"] - frame["temp"].shift(2)
+    frame["temp_diff_6"] = frame["temp"] - frame["temp"].shift(6)
     frame["pres_diff_1"] = frame["pres"] - frame["pres"].shift(1)
-    frame["pres_diff_3"] = frame["pres"] - frame["pres"].shift(3)
+    frame["pres_diff_2"] = frame["pres"] - frame["pres"].shift(2)
+    frame["pres_diff_6"] = frame["pres"] - frame["pres"].shift(6)
     frame["wind_speed_diff_1"] = frame["wind_speed"] - frame["wind_speed"].shift(1)
-    frame["wind_speed_diff_3"] = frame["wind_speed"] - frame["wind_speed"].shift(3)
+    frame["wind_speed_diff_2"] = frame["wind_speed"] - frame["wind_speed"].shift(2)
+    frame["wind_speed_diff_6"] = frame["wind_speed"] - frame["wind_speed"].shift(6)
 
     # Interaction features
     frame["temp_x_humidity"] = frame["temp"].fillna(0.0) * frame["humidity"].fillna(0.0)
@@ -195,13 +198,13 @@ def build_hourly_feature_frame(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str
     frame["wind_speed_x_pm25_lag1"] = frame["wind_speed"].fillna(0.0) * frame["pm25_lag1"].fillna(0.0)
 
     feature_columns = [
-        "pm25_lag1", "pm25_lag3", "pm25_lag6", "pm25_lag12", "pm25_lag18", "pm25_lag24", "pm25_lag36", "pm25_lag48",
-        "pm25_roll_mean_6", "pm25_roll_mean_12", "pm25_roll_mean_24", "pm25_roll_mean_168",
-        "pm25_roll_std_6", "pm25_roll_std_12", "pm25_roll_std_24", "pm25_roll_std_168",
-        "pm25_diff_1", "pm25_diff_3", "pm25_diff_6", "pm25_diff_12",
+        "pm25_lag1", "pm25_lag2", "pm25_lag3", "pm25_lag4", "pm25_lag6", "pm25_lag8", "pm25_lag12", "pm25_lag24",
+        "pm25_roll_mean_3", "pm25_roll_mean_6", "pm25_roll_mean_12", "pm25_roll_mean_24",
+        "pm25_roll_std_3", "pm25_roll_std_6", "pm25_roll_std_12", "pm25_roll_std_24",
+        "pm25_diff_1", "pm25_diff_2", "pm25_diff_3", "pm25_diff_6",
         "hour_sin", "hour_cos", "month_sin", "month_cos", "weekday", "is_weekend", "is_holiday", "is_daytime", "is_rush_hour",
         "temp", "pres", "dewp", "humidity", "wind_speed", "precipitation", "wind_dir_sin", "wind_dir_cos", "precipitation_flag", "dewp_temp_gap",
-        "temp_diff_1", "temp_diff_3", "pres_diff_1", "pres_diff_3", "wind_speed_diff_1", "wind_speed_diff_3",
+        "temp_diff_1", "temp_diff_2", "pres_diff_1", "pres_diff_2", "wind_speed_diff_1", "wind_speed_diff_2",
         "temp_x_humidity", "wind_speed_x_wind_dir_sin", "wind_speed_x_pm25_lag1",
     ]
     return frame, feature_columns
@@ -297,6 +300,7 @@ def write_feature_doc(metadata: dict[str, Any]) -> None:
             "## 概述",
             "",
             "- 预测目标：`pm25`（PM2.5 小时浓度，单位 μg/m³）",
+            "- 当前特征集更偏向 `h1 / h6` 这类短中期点预测任务",
             "- 输入数据：`data/processed/beijing_hourly.csv`",
             "- 输出目录：`data/processed/features_hourly/`",
             "",
@@ -313,25 +317,25 @@ def write_feature_doc(metadata: dict[str, Any]) -> None:
             "| 特征名 | 说明 |",
             "|--------|------|",
             "| pm25_lag1 | 前 1 小时 PM2.5 |",
+            "| pm25_lag2 | 前 2 小时 PM2.5 |",
             "| pm25_lag3 | 前 3 小时 PM2.5 |",
+            "| pm25_lag4 | 前 4 小时 PM2.5 |",
             "| pm25_lag6 | 前 6 小时 PM2.5 |",
+            "| pm25_lag8 | 前 8 小时 PM2.5 |",
             "| pm25_lag12 | 前 12 小时 PM2.5 |",
-            "| pm25_lag18 | 前 18 小时 PM2.5 |",
             "| pm25_lag24 | 前 24 小时 PM2.5 |",
-            "| pm25_lag36 | 前 36 小时 PM2.5 |",
-            "| pm25_lag48 | 前 48 小时 PM2.5 |",
+            "| pm25_roll_mean_3 | 3 小时滚动均值（滞后 1 小时） |",
             "| pm25_roll_mean_6 | 6 小时滚动均值（滞后 1 小时） |",
             "| pm25_roll_mean_12 | 12 小时滚动均值（滞后 1 小时） |",
             "| pm25_roll_mean_24 | 24 小时滚动均值（滞后 1 小时） |",
-            "| pm25_roll_mean_168 | 168 小时（7 天）滚动均值（滞后 1 小时） |",
+            "| pm25_roll_std_3 | 3 小时滚动标准差（滞后 1 小时） |",
             "| pm25_roll_std_6 | 6 小时滚动标准差（滞后 1 小时） |",
             "| pm25_roll_std_12 | 12 小时滚动标准差（滞后 1 小时） |",
             "| pm25_roll_std_24 | 24 小时滚动标准差（滞后 1 小时） |",
-            "| pm25_roll_std_168 | 168 小时滚动标准差（滞后 1 小时） |",
             "| pm25_diff_1 | 当前 PM2.5 相对 1 小时前变化 |",
+            "| pm25_diff_2 | 当前 PM2.5 相对 2 小时前变化 |",
             "| pm25_diff_3 | 当前 PM2.5 相对 3 小时前变化 |",
             "| pm25_diff_6 | 当前 PM2.5 相对 6 小时前变化 |",
-            "| pm25_diff_12 | 当前 PM2.5 相对 12 小时前变化 |",
             "| hour_sin | 小时正弦周期编码 |",
             "| hour_cos | 小时余弦周期编码 |",
             "| month_sin | 月份正弦周期编码 |",
@@ -352,11 +356,11 @@ def write_feature_doc(metadata: dict[str, Any]) -> None:
             "| precipitation_flag | 是否有降水（0/1） |",
             "| dewp_temp_gap | 温度与露点差（temp-dewp） |",
             "| temp_diff_1 | 温度相对 1 小时前变化 |",
-            "| temp_diff_3 | 温度相对 3 小时前变化 |",
+            "| temp_diff_2 | 温度相对 2 小时前变化 |",
             "| pres_diff_1 | 气压相对 1 小时前变化 |",
-            "| pres_diff_3 | 气压相对 3 小时前变化 |",
+            "| pres_diff_2 | 气压相对 2 小时前变化 |",
             "| wind_speed_diff_1 | 风速相对 1 小时前变化 |",
-            "| wind_speed_diff_3 | 风速相对 3 小时前变化 |",
+            "| wind_speed_diff_2 | 风速相对 2 小时前变化 |",
             "| temp_x_humidity | 温度 × 湿度交互项 |",
             "| wind_speed_x_wind_dir_sin | 风速 × sin(风向角) 交互项 |",
             "| wind_speed_x_pm25_lag1 | 风速 × PM2.5(t-1) 交互项 |",

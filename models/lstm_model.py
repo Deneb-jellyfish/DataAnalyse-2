@@ -1,8 +1,8 @@
-"""LSTM model and trainer for hourly PM2.5 prediction (+1h and +24h).
+"""LSTM model and trainer for hourly PM2.5 prediction.
 
 Architecture:
   - 2-layer LSTM with configurable hidden dim and dropout
-  - Final linear projection to scalar PM2.5
+  - Final linear projection to one or many forecast steps
   - Trainer with Adam, MSE loss, and early stopping
 """
 
@@ -40,11 +40,13 @@ class LSTMModel(nn.Module):
         hidden_dim: int = 64,
         num_layers: int = 2,
         dropout: float = 0.2,
+        output_dim: int = 1,
     ) -> None:
         super().__init__()
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
+        self.output_dim = output_dim
 
         lstm_dropout = dropout if num_layers > 1 else 0.0
         self.lstm = nn.LSTM(
@@ -54,7 +56,7 @@ class LSTMModel(nn.Module):
             batch_first=True,
             dropout=lstm_dropout,
         )
-        self.fc = nn.Linear(hidden_dim, 1)
+        self.fc = nn.Linear(hidden_dim, output_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass.
@@ -67,11 +69,14 @@ class LSTMModel(nn.Module):
         Returns
         -------
         torch.Tensor
-            Shape (batch,).
+            Shape (batch,) when ``output_dim == 1`` else ``(batch, output_dim)``.
         """
         lstm_out, _ = self.lstm(x)                       # (batch, seq_len, hidden_dim)
         last_hidden = lstm_out[:, -1, :]                  # (batch, hidden_dim)
-        return self.fc(last_hidden).squeeze(-1)           # (batch,)
+        output = self.fc(last_hidden)
+        if self.output_dim == 1:
+            return output.squeeze(-1)
+        return output
 
 
 class LSTMTrainer:

@@ -1,3 +1,8 @@
-model,horizon_hours,rmse,mae,mape,n_samples,notes
-Prophet,1,,,,0,blocked:prophet_import_failed:ModuleNotFoundError
-Prophet,12,,,,0,blocked:prophet_import_failed:ModuleNotFoundError
+model,task,horizon_hours,rmse,mae,mape,n_samples,notes
+Prophet,h1,1,57.75352172717099,41.96947470971347,141.51437748931158,5277,"fit_time_s=9.8,pred_time_s=2.0"
+Prophet,seq6,1,59.34725519049269,43.14103259199783,148.31099332304754,5298,"fit_time_s=9.8,pred_time_s=11.4,rolling_steps=6"
+Prophet,seq6,2,58.072384016769355,43.647670625515,162.83791473461864,5298,"fit_time_s=9.8,pred_time_s=11.4,rolling_steps=6"
+Prophet,seq6,3,62.039347686694,44.43563513382586,127.79534080306357,5298,"fit_time_s=9.8,pred_time_s=11.4,rolling_steps=6"
+Prophet,seq6,4,58.6646550482606,43.54858262206716,154.72182534020138,5298,"fit_time_s=9.8,pred_time_s=11.4,rolling_steps=6"
+Prophet,seq6,5,57.92428560054042,44.06235502897567,173.04280811215565,5298,"fit_time_s=9.8,pred_time_s=11.4,rolling_steps=6"
+Prophet,seq6,6,59.855841826445946,43.08247822383183,141.97643588695914,5298,"fit_time_s=9.8,pred_time_s=11.4,rolling_steps=6"

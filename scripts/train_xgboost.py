@@ -1,4 +1,4 @@
-"""Train XGBoost for hourly PM2.5 prediction tasks (+1h and +12h)."""
+"""Train XGBoost for hourly PM2.5 h1 and seq6 tasks."""
 
 from __future__ import annotations
 
@@ -16,85 +16,37 @@ from sklearn.model_selection import TimeSeriesSplit
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from evaluation.metrics import compute_metrics
 from models.xgboost_model import XGBoostHourlyModel
 from utils.feature_engineering import StandardScaler, build_hourly_feature_frame
+from utils.hourly_experiment import make_prediction_frame, metric_rows_from_predictions
 from utils.io import PROCESSED_DIR
 
 OUTPUT_DIR = ROOT / "outputs" / "hourly"
-FEATURES_DIR = PROCESSED_DIR / "features_hourly"
 
 
-def load_h1_data():
-    """Build +1h data by shifting pm25 target by -1 hour."""
+def load_direct_data(horizon: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[str]]:
+    """Build a direct supervised dataset for one forecast horizon."""
     df = pd.read_csv(PROCESSED_DIR / "beijing_hourly.csv")
     frame, feature_names = build_hourly_feature_frame(df)
-    frame["pm25_target_h1"] = frame["pm25"].shift(-1)
-    valid = frame.dropna(subset=feature_names + ["pm25_target_h1"]).reset_index(drop=True)
+    target_col = f"pm25_target_h{horizon}"
+    frame[target_col] = frame["pm25"].shift(-horizon)
+    valid = frame.dropna(subset=feature_names + [target_col]).reset_index(drop=True)
 
     split_idx = int(len(valid) * 0.8)
     train = valid.iloc[:split_idx]
     test = valid.iloc[split_idx:]
 
     scaler = StandardScaler()
-    X_train = scaler.fit_transform(train[feature_names].values)
-    X_test = scaler.transform(test[feature_names].values)
-    y_train = train["pm25_target_h1"].values.astype(np.float64)
-    y_test = test["pm25_target_h1"].values.astype(np.float64)
-    dates_train = train["datetime"].values
+    X_train = scaler.fit_transform(train[feature_names].values.astype(np.float64))
+    X_test = scaler.transform(test[feature_names].values.astype(np.float64))
+    y_train = train[target_col].values.astype(np.float64)
+    y_test = test[target_col].values.astype(np.float64)
     dates_test = test["datetime"].values
-
-    return X_train, X_test, y_train, y_test, dates_train, dates_test, feature_names
-
-
-def load_h12_data():
-    df = pd.read_csv(PROCESSED_DIR / "beijing_hourly.csv")
-    frame, feature_names = build_hourly_feature_frame(df)
-    frame["pm25_target_h12"] = frame["pm25"].shift(-12)
-    valid = frame.dropna(subset=feature_names + ["pm25_target_h12"]).reset_index(drop=True)
-
-    split_idx = int(len(valid) * 0.8)
-    train = valid.iloc[:split_idx]
-    test = valid.iloc[split_idx:]
-
-    scaler = StandardScaler()
-    X_train = scaler.fit_transform(train[feature_names].values)
-    X_test = scaler.transform(test[feature_names].values)
-    y_train = train["pm25_target_h12"].values.astype(np.float64)
-    y_test = test["pm25_target_h12"].values.astype(np.float64)
-    dates_train = train["datetime"].values
-    dates_test = test["datetime"].values
-
-    return X_train, X_test, y_train, y_test, dates_train, dates_test, feature_names
-
-
-def make_prediction_csv(
-    forecast_times: np.ndarray,
-    y_true: np.ndarray,
-    y_pred: np.ndarray,
-    horizon: int,
-    model_name: str,
-    city: str = "Beijing",
-    split: str = "test",
-) -> pd.DataFrame:
-    forecast_dt = pd.to_datetime(forecast_times)
-    target_dt = forecast_dt + pd.Timedelta(hours=int(horizon))
-    return pd.DataFrame(
-        {
-            "forecast_origin_time": forecast_dt.strftime("%Y-%m-%d %H:%M:%S"),
-            "target_time": target_dt.strftime("%Y-%m-%d %H:%M:%S"),
-            "horizon_hours": int(horizon),
-            "city": city,
-            "model": model_name,
-            "y_true": y_true,
-            "y_pred": y_pred,
-            "split": split,
-        }
-    )
+    return X_train, X_test, y_train, y_test, dates_test, feature_names
 
 
 def _sample_params(trial: optuna.Trial, task: str, tune_stage: str) -> dict:
-    """Sample params by stage: first-round coarse grid, second-round local refinement."""
+    """Sample XGBoost hyperparameters for coarse or refined tuning."""
     if tune_stage == "first":
         params = {
             "n_estimators": trial.suggest_categorical("n_estimators", [200, 400, 800]),
@@ -106,32 +58,30 @@ def _sample_params(trial: optuna.Trial, task: str, tune_stage: str) -> dict:
             "reg_lambda": trial.suggest_categorical("reg_lambda", [1, 3, 5]),
             "reg_alpha": trial.suggest_categorical("reg_alpha", [0.0, 0.1, 0.5]),
         }
+    elif task == "seq6":
+        params = {
+            "n_estimators": trial.suggest_categorical("n_estimators", [400, 600, 800, 1000, 1200]),
+            "max_depth": trial.suggest_categorical("max_depth", [3, 4, 5, 6]),
+            "learning_rate": trial.suggest_categorical("learning_rate", [0.015, 0.02, 0.03, 0.04, 0.05]),
+            "subsample": trial.suggest_categorical("subsample", [0.8, 0.9, 1.0]),
+            "colsample_bytree": trial.suggest_categorical("colsample_bytree", [0.7, 0.8, 0.9, 1.0]),
+            "min_child_weight": trial.suggest_categorical("min_child_weight", [3, 5, 7, 9]),
+            "reg_lambda": trial.suggest_categorical("reg_lambda", [3, 5, 7, 9]),
+            "reg_alpha": trial.suggest_categorical("reg_alpha", [0.0, 0.05, 0.1, 0.2]),
+            "gamma": trial.suggest_categorical("gamma", [0.0, 0.1, 0.3]),
+        }
     else:
-        # Stage-2 local refinement for harder horizon (especially h12)
-        if task == "h12":
-            params = {
-                "n_estimators": trial.suggest_categorical("n_estimators", [400, 600, 800, 1000, 1200]),
-                "max_depth": trial.suggest_categorical("max_depth", [3, 4, 5, 6]),
-                "learning_rate": trial.suggest_categorical("learning_rate", [0.015, 0.02, 0.03, 0.04, 0.05]),
-                "subsample": trial.suggest_categorical("subsample", [0.8, 0.9, 1.0]),
-                "colsample_bytree": trial.suggest_categorical("colsample_bytree", [0.7, 0.8, 0.9, 1.0]),
-                "min_child_weight": trial.suggest_categorical("min_child_weight", [3, 5, 7, 9]),
-                "reg_lambda": trial.suggest_categorical("reg_lambda", [3, 5, 7, 9]),
-                "reg_alpha": trial.suggest_categorical("reg_alpha", [0.0, 0.05, 0.1, 0.2]),
-                "gamma": trial.suggest_categorical("gamma", [0.0, 0.1, 0.3]),
-            }
-        else:
-            params = {
-                "n_estimators": trial.suggest_categorical("n_estimators", [300, 400, 500, 700]),
-                "max_depth": trial.suggest_categorical("max_depth", [3, 4, 5, 6]),
-                "learning_rate": trial.suggest_categorical("learning_rate", [0.02, 0.03, 0.04, 0.05]),
-                "subsample": trial.suggest_categorical("subsample", [0.8, 0.9, 1.0]),
-                "colsample_bytree": trial.suggest_categorical("colsample_bytree", [0.7, 0.8, 0.9, 1.0]),
-                "min_child_weight": trial.suggest_categorical("min_child_weight", [1, 3, 5, 7]),
-                "reg_lambda": trial.suggest_categorical("reg_lambda", [2, 3, 5, 7]),
-                "reg_alpha": trial.suggest_categorical("reg_alpha", [0.0, 0.05, 0.1, 0.2]),
-                "gamma": trial.suggest_categorical("gamma", [0.0, 0.1, 0.2]),
-            }
+        params = {
+            "n_estimators": trial.suggest_categorical("n_estimators", [300, 400, 500, 700]),
+            "max_depth": trial.suggest_categorical("max_depth", [3, 4, 5, 6]),
+            "learning_rate": trial.suggest_categorical("learning_rate", [0.02, 0.03, 0.04, 0.05]),
+            "subsample": trial.suggest_categorical("subsample", [0.8, 0.9, 1.0]),
+            "colsample_bytree": trial.suggest_categorical("colsample_bytree", [0.7, 0.8, 0.9, 1.0]),
+            "min_child_weight": trial.suggest_categorical("min_child_weight", [1, 3, 5, 7]),
+            "reg_lambda": trial.suggest_categorical("reg_lambda", [2, 3, 5, 7]),
+            "reg_alpha": trial.suggest_categorical("reg_alpha", [0.0, 0.05, 0.1, 0.2]),
+            "gamma": trial.suggest_categorical("gamma", [0.0, 0.1, 0.2]),
+        }
 
     params["early_stopping_rounds"] = 100
     return params
@@ -145,12 +95,11 @@ def _tune_task(
     n_trials: int = 30,
     tune_stage: str = "first",
 ) -> dict:
-    """Optuna tuning aligned with plan: first coarse grid, then local refinement."""
+    """Run Optuna with rolling CV and return the best parameter set."""
     tscv = TimeSeriesSplit(n_splits=5)
 
     def objective(trial: optuna.Trial) -> float:
         params = _sample_params(trial, task=task, tune_stage=tune_stage)
-
         fold_scores = []
         for fold_idx, (tr_idx, va_idx) in enumerate(tscv.split(X_train)):
             X_tr_fold, X_va_fold = X_train[tr_idx], X_train[va_idx]
@@ -167,82 +116,144 @@ def _tune_task(
 
     study = optuna.create_study(
         direction="minimize",
-        study_name=f"xgb_{task}_{tune_stage}_round",
+        study_name=f"xgb_{task}_{tune_stage}",
         pruner=optuna.pruners.MedianPruner(n_warmup_steps=2),
     )
     study.optimize(objective, n_trials=n_trials, show_progress_bar=True)
     return study.best_params
 
 
-def _run_task(task: str, tune: bool = False, n_trials: int = 30, tune_stage: str = "first") -> dict:
-    if task == "h1":
-        horizon = 1
-        X_train, X_test, y_train, y_test, _, dates_test, feature_names = load_h1_data()
-    else:
-        horizon = 12
-        X_train, X_test, y_train, y_test, _, dates_test, feature_names = load_h12_data()
-
-    best_params = (
-        _tune_task(task, X_train, y_train, feature_names, n_trials=n_trials, tune_stage=tune_stage)
-        if tune
-        else None
-    )
-
+def _fit_model(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    feature_names: list[str],
+    params: dict | None,
+) -> tuple[XGBoostHourlyModel, dict, float]:
     val_split = int(len(X_train) * 0.8)
     X_tr, X_va = X_train[:val_split], X_train[val_split:]
     y_tr, y_va = y_train[:val_split], y_train[val_split:]
 
-    train_params = dict(best_params) if best_params else None
+    train_params = dict(params) if params else None
     if train_params is not None:
         train_params["early_stopping_rounds"] = 100
 
-    t0 = time.time()
     model = XGBoostHourlyModel(params=train_params)
+    t0 = time.time()
     meta = model.fit(X_tr, y_tr, X_va, y_va, feature_names=feature_names)
     train_time = time.time() - t0
+    return model, meta, train_time
 
+
+def run_h1(tune: bool = False, n_trials: int = 30, tune_stage: str = "first") -> list[dict]:
+    """Train and save h1 outputs."""
+    X_train, X_test, y_train, y_test, dates_test, feature_names = load_direct_data(horizon=1)
+    best_params = (
+        _tune_task("h1", X_train, y_train, feature_names, n_trials=n_trials, tune_stage=tune_stage)
+        if tune
+        else None
+    )
+
+    model, meta, train_time = _fit_model(X_train, y_train, feature_names, best_params)
     y_pred = model.predict(X_test)
-    metrics = compute_metrics(y_test, y_pred)
 
-    pred_df = make_prediction_csv(dates_test, y_test, y_pred, horizon=horizon, model_name="XGBoost")
-    pred_df.to_csv(OUTPUT_DIR / f"xgboost_predictions_{task}.csv", index=False)
-
-    imp_df = model.get_feature_importance()
-    imp_df.to_csv(OUTPUT_DIR / f"xgboost_feature_importance_{task}.csv", index=False)
-
-    model.save(OUTPUT_DIR / f"xgboost_{task}.pkl")
+    pred_df = make_prediction_frame(
+        forecast_times=dates_test,
+        y_true=y_test,
+        y_pred=y_pred,
+        horizon=1,
+        model_name="XGBoost",
+        task="h1",
+    )
+    pred_df.to_csv(OUTPUT_DIR / "xgboost_predictions_h1.csv", index=False)
+    model.get_feature_importance().to_csv(OUTPUT_DIR / "xgboost_feature_importance_h1.csv", index=False)
+    model.save(OUTPUT_DIR / "xgboost_h1.pkl")
 
     params_to_save = dict(model.params)
     if best_params:
         params_to_save.update(best_params)
-    with open(OUTPUT_DIR / f"xgboost_{task}_best_params.json", "w", encoding="utf-8") as f:
-        json.dump(params_to_save, f, ensure_ascii=False, indent=2)
+    with open(OUTPUT_DIR / "xgboost_h1_best_params.json", "w", encoding="utf-8") as handle:
+        json.dump(params_to_save, handle, ensure_ascii=False, indent=2)
 
-    return {
-        "model": "XGBoost",
-        "horizon_hours": int(horizon),
-        "rmse": metrics["rmse"],
-        "mae": metrics["mae"],
-        "mape": metrics["mape"],
-        "n_samples": int(metrics["n_samples"]),
-        "notes": f"tuned={tune},stage={tune_stage},best_iteration={meta['best_iteration']},train_time_s={train_time:.1f}",
-    }
+    notes = f"best_iteration={meta['best_iteration']},train_time_s={train_time:.1f},tuned={tune},stage={tune_stage}"
+    return metric_rows_from_predictions(pred_df, model_name="XGBoost", task="h1", notes=notes)
+
+
+def run_seq6(tune: bool = False, n_trials: int = 30, tune_stage: str = "first") -> list[dict]:
+    """Train six direct-horizon models and assemble seq6 outputs."""
+    pred_frames: list[pd.DataFrame] = []
+    feature_frames: list[pd.DataFrame] = []
+    param_map: dict[str, dict] = {}
+    note_chunks: list[str] = []
+
+    for horizon in range(1, 7):
+        X_train, X_test, y_train, y_test, dates_test, feature_names = load_direct_data(horizon=horizon)
+        best_params = (
+            _tune_task("seq6", X_train, y_train, feature_names, n_trials=n_trials, tune_stage=tune_stage)
+            if tune
+            else None
+        )
+
+        model, meta, train_time = _fit_model(X_train, y_train, feature_names, best_params)
+        y_pred = model.predict(X_test)
+
+        pred_frames.append(
+            make_prediction_frame(
+                forecast_times=dates_test,
+                y_true=y_test,
+                y_pred=y_pred,
+                horizon=horizon,
+                model_name="XGBoost",
+                task="seq6",
+            )
+        )
+
+        feature_df = model.get_feature_importance().copy()
+        feature_df["horizon_hours"] = horizon
+        feature_frames.append(feature_df)
+
+        params_to_save = dict(model.params)
+        if best_params:
+            params_to_save.update(best_params)
+        param_map[f"h{horizon}"] = params_to_save
+        model.save(OUTPUT_DIR / f"xgboost_seq6_h{horizon}.pkl")
+        note_chunks.append(
+            f"h{horizon}:best_iteration={meta['best_iteration']},train_time_s={train_time:.1f}"
+        )
+
+    pred_df = pd.concat(pred_frames, ignore_index=True)
+    pred_df.to_csv(OUTPUT_DIR / "xgboost_predictions_seq6.csv", index=False)
+
+    feature_all = pd.concat(feature_frames, ignore_index=True)
+    feature_summary = (
+        feature_all.groupby("feature", as_index=False)[["gain", "gain_norm"]]
+        .mean()
+        .sort_values("gain_norm", ascending=False)
+        .reset_index(drop=True)
+    )
+    feature_summary.to_csv(OUTPUT_DIR / "xgboost_feature_importance_seq6.csv", index=False)
+
+    with open(OUTPUT_DIR / "xgboost_seq6_best_params.json", "w", encoding="utf-8") as handle:
+        json.dump(param_map, handle, ensure_ascii=False, indent=2)
+
+    notes = f"direct_multi_horizon,tuned={tune},stage={tune_stage}," + ";".join(note_chunks)
+    return metric_rows_from_predictions(pred_df, model_name="XGBoost", task="seq6", notes=notes)
 
 
 def save_metrics(rows: list[dict]) -> None:
+    """Persist combined metrics."""
     path = OUTPUT_DIR / "xgboost_metrics.csv"
     df = pd.DataFrame(rows)
-    cols = ["model", "horizon_hours", "rmse", "mae", "mape", "n_samples", "notes"]
-    for c in cols:
-        if c not in df.columns:
-            df[c] = ""
-    df = df[cols]
+    cols = ["model", "task", "horizon_hours", "rmse", "mae", "mape", "n_samples", "notes"]
+    for column in cols:
+        if column not in df.columns:
+            df[column] = ""
+    df = df[cols].sort_values(["task", "horizon_hours"]).reset_index(drop=True)
     df.to_csv(path, index=False)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train XGBoost for hourly PM2.5")
-    parser.add_argument("--task", default="both", choices=["h1", "h12", "both"])
+    parser.add_argument("--task", default="both", choices=["h1", "seq6", "both"])
     parser.add_argument("--tune", action="store_true", help="Run Optuna tuning for selected task(s)")
     parser.add_argument("--tune-stage", default="first", choices=["first", "second"], help="Tuning stage")
     parser.add_argument("--trials", type=int, default=24)
@@ -250,13 +261,12 @@ def main() -> None:
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    all_rows = []
+    rows: list[dict] = []
     if args.task in ("h1", "both"):
-        all_rows.append(_run_task("h1", tune=args.tune, n_trials=args.trials, tune_stage=args.tune_stage))
-    if args.task in ("h12", "both"):
-        all_rows.append(_run_task("h12", tune=args.tune, n_trials=args.trials, tune_stage=args.tune_stage))
-
-    save_metrics(all_rows)
+        rows.extend(run_h1(tune=args.tune, n_trials=args.trials, tune_stage=args.tune_stage))
+    if args.task in ("seq6", "both"):
+        rows.extend(run_seq6(tune=args.tune, n_trials=args.trials, tune_stage=args.tune_stage))
+    save_metrics(rows)
 
 
 if __name__ == "__main__":
