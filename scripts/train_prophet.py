@@ -1,4 +1,4 @@
-"""Train Prophet for hourly PM2.5 h1 and seq6 tasks."""
+"""Train an enhanced Prophet baseline for hourly PM2.5 h1 and seq6 tasks."""
 
 from __future__ import annotations
 
@@ -14,55 +14,84 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from utils.hourly_experiment import make_multi_horizon_prediction_frame, make_prediction_frame, metric_rows_from_predictions
+from utils.feature_engineering import build_hourly_feature_frame
+from utils.hourly_experiment import make_prediction_frame, metric_rows_from_predictions
 from utils.io import PROCESSED_DIR
 
 OUTPUT_DIR = ROOT / "outputs" / "hourly"
 
 
-def load_and_split() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Load the Beijing hourly series and split chronologically."""
+def load_direct_data(horizon: int) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
+    """Build a direct supervised dataset for one horizon.
+
+    The target remains the PM2.5 value at `t + horizon`, while all regressors are
+    computed from the origin timestamp `t`. This mirrors the direct multi-horizon
+    setup used by the tree models and avoids the degenerate "time-only" Prophet fit.
+    """
+
     df = pd.read_csv(PROCESSED_DIR / "beijing_hourly.csv")
-    df["ds"] = pd.to_datetime(df["datetime"])
-    df["y"] = df["pm25"].astype(float)
-    df = df.dropna(subset=["ds", "y"]).sort_values("ds").reset_index(drop=True)
+    frame, feature_names = build_hourly_feature_frame(df)
 
-    split_idx = int(len(df) * 0.8)
-    train_df = df.iloc[:split_idx].copy()
-    test_df = df.iloc[split_idx:].copy()
-    return df, train_df, test_df
+    target_col = f"pm25_target_h{horizon}"
+    frame[target_col] = frame["pm25"].shift(-horizon)
+    frame["target_time"] = pd.to_datetime(frame["datetime"]) + pd.Timedelta(hours=horizon)
+    valid = frame.dropna(subset=feature_names + [target_col]).reset_index(drop=True)
+
+    prophet_df = valid[["datetime", "target_time", target_col] + feature_names].copy()
+    prophet_df = prophet_df.rename(
+        columns={
+            "datetime": "forecast_origin_time",
+            "target_time": "ds",
+            target_col: "y",
+        }
+    )
+
+    split_idx = int(len(prophet_df) * 0.8)
+    train_df = prophet_df.iloc[:split_idx].copy()
+    test_df = prophet_df.iloc[split_idx:].copy()
+    return train_df, test_df, feature_names
 
 
-def fit_prophet(train_df: pd.DataFrame):
-    """Fit one Prophet model on the train split."""
+def fit_prophet(train_df: pd.DataFrame, feature_names: list[str]):
+    """Fit one enhanced Prophet model on a direct supervised split."""
     from prophet import Prophet
 
     model = Prophet(
         daily_seasonality=True,
         weekly_seasonality=True,
-        yearly_seasonality=True,
+        yearly_seasonality=False,
+        changepoint_prior_scale=0.1,
+        seasonality_prior_scale=5.0,
+        seasonality_mode="additive",
     )
+    for feature in feature_names:
+        model.add_regressor(feature, standardize="auto")
+
     t0 = time.time()
-    model.fit(train_df[["ds", "y"]].copy())
+    model.fit(train_df[["ds", "y"] + feature_names].copy())
     fit_time = time.time() - t0
     return model, fit_time
 
 
-def run_h1(model, fit_time: float, full_lookup: dict[pd.Timestamp, float], test_df: pd.DataFrame) -> list[dict]:
-    """Generate h1 prediction and metrics artifacts."""
-    target_times = pd.to_datetime(test_df["ds"]) + pd.Timedelta(hours=1)
+def _predict(model, df: pd.DataFrame, feature_names: list[str]) -> tuple[np.ndarray, float]:
+    """Generate clipped Prophet predictions with elapsed time."""
     t0 = time.time()
-    forecast = model.predict(pd.DataFrame({"ds": target_times}))
+    forecast = model.predict(df[["ds"] + feature_names].copy())
     pred_time = time.time() - t0
+    y_pred = np.clip(forecast["yhat"].to_numpy(dtype=np.float64), 0.0, None)
+    return y_pred, pred_time
 
-    y_true = np.array([full_lookup.get(pd.Timestamp(ts), np.nan) for ts in target_times], dtype=np.float64)
-    y_pred = forecast["yhat"].values.astype(np.float64)
-    valid = ~(np.isnan(y_true) | np.isnan(y_pred))
+
+def run_h1() -> list[dict]:
+    """Train and save enhanced h1 Prophet outputs."""
+    train_df, test_df, feature_names = load_direct_data(horizon=1)
+    model, fit_time = fit_prophet(train_df, feature_names)
+    y_pred, pred_time = _predict(model, test_df, feature_names)
 
     pred_df = make_prediction_frame(
-        forecast_times=test_df["ds"].values[valid],
-        y_true=y_true[valid],
-        y_pred=y_pred[valid],
+        forecast_times=test_df["forecast_origin_time"].to_numpy(),
+        y_true=test_df["y"].to_numpy(dtype=np.float64),
+        y_pred=y_pred,
         horizon=1,
         model_name="Prophet",
         task="h1",
@@ -74,9 +103,15 @@ def run_h1(model, fit_time: float, full_lookup: dict[pd.Timestamp, float], test_
             {
                 "task": "h1",
                 "horizon_hours": 1,
+                "mode": "direct_supervised_with_regressors",
                 "daily_seasonality": True,
                 "weekly_seasonality": True,
-                "yearly_seasonality": True,
+                "yearly_seasonality": False,
+                "changepoint_prior_scale": 0.1,
+                "seasonality_prior_scale": 5.0,
+                "seasonality_mode": "additive",
+                "n_regressors": len(feature_names),
+                "regressors": feature_names,
                 "fit_time_s": round(fit_time, 1),
                 "pred_time_s": round(pred_time, 1),
                 "status": "done",
@@ -85,41 +120,41 @@ def run_h1(model, fit_time: float, full_lookup: dict[pd.Timestamp, float], test_
             ensure_ascii=False,
             indent=2,
         )
-    return metric_rows_from_predictions(
-        pred_df,
-        model_name="Prophet",
-        task="h1",
-        notes=f"fit_time_s={fit_time:.1f},pred_time_s={pred_time:.1f}",
+
+    notes = (
+        f"direct_with_48_features,fit_time_s={fit_time:.1f},pred_time_s={pred_time:.1f},"
+        "yearly=False,changepoint=0.1,seasonality=5.0"
     )
+    return metric_rows_from_predictions(pred_df, model_name="Prophet", task="h1", notes=notes)
 
 
-def run_seq6(model, fit_time: float, full_lookup: dict[pd.Timestamp, float], test_df: pd.DataFrame) -> list[dict]:
-    """Generate seq6 prediction and metrics artifacts."""
-    n_rows = len(test_df) - 6
-    origin_times = pd.to_datetime(test_df["ds"].iloc[:n_rows]).reset_index(drop=True)
-    y_true_matrix = np.zeros((n_rows, 6), dtype=np.float64)
-    for index in range(n_rows):
-        y_true_matrix[index] = test_df["y"].iloc[index + 1 : index + 7].to_numpy(dtype=np.float64)
+def run_seq6() -> list[dict]:
+    """Train six direct-horizon Prophet models and assemble seq6 outputs."""
+    pred_frames: list[pd.DataFrame] = []
+    fit_times: dict[str, float] = {}
+    pred_times: dict[str, float] = {}
+    feature_names_used: list[str] | None = None
 
-    target_grid = {
-        horizon: origin_times + pd.Timedelta(hours=horizon)
-        for horizon in range(1, 7)
-    }
-    future_df = pd.DataFrame({"ds": pd.Index(np.concatenate([target_grid[h].values for h in range(1, 7)]))})
+    for horizon in range(1, 7):
+        train_df, test_df, feature_names = load_direct_data(horizon=horizon)
+        feature_names_used = feature_names
+        model, fit_time = fit_prophet(train_df, feature_names)
+        y_pred, pred_time = _predict(model, test_df, feature_names)
 
-    t0 = time.time()
-    forecast = model.predict(future_df)
-    pred_time = time.time() - t0
-    yhat = forecast["yhat"].values.astype(np.float64).reshape(6, n_rows).T
+        pred_frames.append(
+            make_prediction_frame(
+                forecast_times=test_df["forecast_origin_time"].to_numpy(),
+                y_true=test_df["y"].to_numpy(dtype=np.float64),
+                y_pred=y_pred,
+                horizon=horizon,
+                model_name="Prophet",
+                task="seq6",
+            )
+        )
+        fit_times[f"h{horizon}"] = round(fit_time, 1)
+        pred_times[f"h{horizon}"] = round(pred_time, 1)
 
-    pred_df = make_multi_horizon_prediction_frame(
-        forecast_times=origin_times.values,
-        y_true=y_true_matrix,
-        y_pred=yhat,
-        horizons=range(1, 7),
-        model_name="Prophet",
-        task="seq6",
-    )
+    pred_df = pd.concat(pred_frames, ignore_index=True)
     pred_df.to_csv(OUTPUT_DIR / "prophet_predictions_seq6.csv", index=False)
 
     with open(OUTPUT_DIR / "prophet_config_seq6.json", "w", encoding="utf-8") as handle:
@@ -127,23 +162,31 @@ def run_seq6(model, fit_time: float, full_lookup: dict[pd.Timestamp, float], tes
             {
                 "task": "seq6",
                 "horizons": [1, 2, 3, 4, 5, 6],
+                "mode": "direct_multi_horizon_with_regressors",
                 "daily_seasonality": True,
                 "weekly_seasonality": True,
-                "yearly_seasonality": True,
-                "fit_time_s": round(fit_time, 1),
-                "pred_time_s": round(pred_time, 1),
+                "yearly_seasonality": False,
+                "changepoint_prior_scale": 0.1,
+                "seasonality_prior_scale": 5.0,
+                "seasonality_mode": "additive",
+                "n_regressors": len(feature_names_used or []),
+                "regressors": feature_names_used or [],
+                "fit_time_s_by_horizon": fit_times,
+                "pred_time_s_by_horizon": pred_times,
                 "status": "done",
             },
             handle,
             ensure_ascii=False,
             indent=2,
         )
-    return metric_rows_from_predictions(
-        pred_df,
-        model_name="Prophet",
-        task="seq6",
-        notes=f"fit_time_s={fit_time:.1f},pred_time_s={pred_time:.1f},rolling_steps=6",
+
+    notes = (
+        "direct_multi_horizon_with_48_features,"
+        + ",".join(f"{key}:fit={value:.1f}" for key, value in fit_times.items())
+        + ","
+        + ",".join(f"{key}:pred={value:.1f}" for key, value in pred_times.items())
     )
+    return metric_rows_from_predictions(pred_df, model_name="Prophet", task="seq6", notes=notes)
 
 
 def save_metrics(rows: list[dict]) -> None:
@@ -182,11 +225,17 @@ def write_blocked_outputs(reason: str) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train Prophet for hourly h1 and seq6 tasks")
+    parser = argparse.ArgumentParser(description="Train enhanced Prophet for hourly h1 and seq6 tasks")
     parser.add_argument(
         "--run",
         action="store_true",
         help="Actually run Prophet training (default: write blocked outputs)",
+    )
+    parser.add_argument(
+        "--task",
+        default="both",
+        choices=["h1", "seq6", "both"],
+        help="Select which Prophet task to train.",
     )
     return parser.parse_args()
 
@@ -207,14 +256,13 @@ def main() -> None:
         print("Prophet blocked: prophet package is unavailable in current environment.")
         return
 
-    _, train_df, test_df = load_and_split()
-    full_lookup = dict(zip(pd.to_datetime(pd.concat([train_df["ds"], test_df["ds"]]).reset_index(drop=True)), pd.concat([train_df["y"], test_df["y"]]).reset_index(drop=True)))
-    model, fit_time = fit_prophet(train_df)
-
     rows: list[dict] = []
-    rows.extend(run_h1(model, fit_time, full_lookup, test_df))
-    rows.extend(run_seq6(model, fit_time, full_lookup, test_df))
+    if args.task in ("h1", "both"):
+        rows.extend(run_h1())
+    if args.task in ("seq6", "both"):
+        rows.extend(run_seq6())
     save_metrics(rows)
+    print("Enhanced Prophet training complete.")
 
 
 if __name__ == "__main__":

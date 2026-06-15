@@ -1,39 +1,81 @@
-"""AQI 项目中文演示版 Streamlit 页面。"""
+"""Streamlit dashboard for the hourly PM2.5 experiment."""
 
 from __future__ import annotations
 
+from html import escape
+import json
+import pickle
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import streamlit as st
-import xgboost as xgb
+import torch
 
-from utils.io import ALIGNED_DIR, BEIJING_DIR
-from visualization.plot import (
-    compute_metric_frame,
-    load_predictions,
-    plot_aqi_error_heatmap,
-    plot_best_model_scatter,
-    plot_metric_bars,
-    plot_prediction_curves,
-)
+from models.lstm_model import LSTMModel, LSTMTrainer
+from models.transformer_model import TimeSeriesTransformer
+from utils.feature_engineering import StandardScaler, build_hourly_feature_frame
+
+ROOT = Path(__file__).resolve().parent
+OUTPUT_DIR = ROOT / "outputs" / "hourly"
+FIGURE_DIR = OUTPUT_DIR / "figures"
+FEATURE_DIR = ROOT / "data" / "processed" / "features_hourly"
+PROCESSED_DIR = ROOT / "data" / "processed"
+
+MODEL_COLORS = {
+    "ARIMA": "#6d645a",
+    "Prophet": "#d66a5d",
+    "XGBoost": "#2f8078",
+    "LSTM": "#d49d2d",
+    "Transformer": "#5e73b9",
+}
+
+MODEL_DESCRIPTIONS = {
+    "ARIMA": "统计时序基线，短期稳定，但多步误差累积明显。",
+    "Prophet": "趋势与季节分解模型，可解释性强，但对突发峰值不够敏感。",
+    "XGBoost": "特征工程驱动的树模型，是当前 6 小时序列预测的综合最优模型。",
+    "LSTM": "循环神经网络模型，当前 h1 单步预测表现最好。",
+    "Transformer": "注意力时序模型，在多步预测上优于 LSTM，但均值仍落后于 XGBoost。",
+}
+
+REALTIME_COLUMNS = [
+    "datetime",
+    "pm25",
+    "temp",
+    "pres",
+    "dewp",
+    "humidity",
+    "wind_dir",
+    "wind_speed",
+    "precipitation",
+]
+
 
 st.set_page_config(
-    page_title="AQI 项目展示系统",
+    page_title="小时级 PM2.5 实验展示系统",
+    page_icon="AQI",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-MODEL_DESCRIPTIONS = {
-    "ARIMA": "传统统计时间序列模型，适合作为经典基线。",
-    "Prophet": "趋势+季节性分解模型，解释性较强，但对突发峰值不够敏感。",
-    "XGBoost": "基于特征工程的树模型，是当前项目中表现最好的模型。",
-    "LSTM": "循环神经网络模型，适合捕捉时间依赖关系。",
-    "Informer": "面向长序列预测的稀疏注意力模型。",
-    "Transformer": "标准注意力时间序列模型，用于和 LSTM/Informer 对比。",
-}
+
+def set_plot_style() -> None:
+    plt.rcParams["font.sans-serif"] = [
+        "Microsoft YaHei",
+        "SimHei",
+        "PingFang SC",
+        "Noto Sans CJK SC",
+        "DejaVu Sans",
+    ]
+    plt.rcParams["axes.unicode_minus"] = False
+    plt.rcParams["axes.facecolor"] = "#fffdf8"
+    plt.rcParams["figure.facecolor"] = "#fffdf8"
+    plt.rcParams["axes.edgecolor"] = "#d7c9b3"
+    plt.rcParams["axes.labelcolor"] = "#352d23"
+    plt.rcParams["xtick.color"] = "#4a4032"
+    plt.rcParams["ytick.color"] = "#4a4032"
+    plt.rcParams["grid.color"] = "#e8dcc9"
 
 
 def inject_css() -> None:
@@ -42,122 +84,214 @@ def inject_css() -> None:
         <style>
         .stApp {
             background:
-                radial-gradient(circle at top left, rgba(228, 171, 71, 0.15), transparent 28%),
-                radial-gradient(circle at top right, rgba(50, 126, 118, 0.12), transparent 24%),
-                linear-gradient(180deg, #f8f5ef 0%, #efe6d7 100%);
-            color: #241f19;
+                radial-gradient(circle at top left, rgba(223, 178, 90, 0.12), transparent 28%),
+                radial-gradient(circle at top right, rgba(58, 124, 114, 0.10), transparent 24%),
+                linear-gradient(180deg, #f7f2e7 0%, #efe4d2 100%);
+            color: #241d17;
         }
         .block-container {
-            padding-top: 1.5rem;
-            padding-bottom: 2rem;
+            padding-top: 1.2rem;
+            padding-bottom: 2.8rem;
+            max-width: 1520px;
         }
         .hero {
-            padding: 1.5rem 1.7rem;
-            border-radius: 26px;
-            background: linear-gradient(135deg, rgba(255, 252, 246, 0.96), rgba(249, 240, 223, 0.9));
-            border: 1px solid rgba(110, 92, 62, 0.16);
-            box-shadow: 0 18px 48px rgba(74, 58, 31, 0.08);
+            padding: 1.7rem 1.9rem;
+            border-radius: 28px;
+            background: linear-gradient(135deg, rgba(255,253,248,0.96), rgba(248,238,220,0.92));
+            border: 1px solid rgba(104, 83, 53, 0.14);
+            box-shadow: 0 18px 56px rgba(68, 52, 25, 0.07);
             margin-bottom: 1rem;
         }
         .hero h1 {
-            font-family: "Microsoft YaHei", "SimHei", "PingFang SC", sans-serif;
-            font-size: 2.5rem;
-            margin-bottom: 0.35rem;
+            margin: 0 0 0.35rem 0;
+            font-size: 2.55rem;
+            font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
         }
         .hero p {
-            margin: 0.2rem 0;
-            line-height: 1.7;
+            margin: 0.25rem 0;
+            line-height: 1.75;
             font-size: 1rem;
-            max-width: 980px;
+            max-width: 1040px;
         }
         .panel {
-            padding: 1rem 1.1rem;
-            border-radius: 20px;
-            background: rgba(255, 252, 245, 0.9);
-            border: 1px solid rgba(110, 92, 62, 0.14);
-            margin-bottom: 0.8rem;
+            padding: 1.15rem 1.25rem;
+            border-radius: 22px;
+            background: rgba(255, 252, 246, 0.94);
+            border: 1px solid rgba(104, 83, 53, 0.14);
+            margin-bottom: 1rem;
+            box-shadow: 0 10px 26px rgba(80, 60, 30, 0.04);
+        }
+        .panel strong {
+            color: #7a5722;
+            display: inline-block;
+            margin-bottom: 0.45rem;
+            font-size: 1.03rem;
+        }
+        .card-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 18px;
+            margin: 0.95rem 0 1.25rem 0;
         }
         .small-card {
-            padding: 0.9rem 1rem;
+            padding: 1.1rem 1.15rem;
             border-radius: 18px;
-            background: rgba(255, 252, 245, 0.92);
-            border: 1px solid rgba(110, 92, 62, 0.14);
-            min-height: 120px;
+            background: rgba(255, 252, 246, 0.95);
+            border: 1px solid rgba(104, 83, 53, 0.14);
+            min-height: 170px;
+            box-shadow: 0 12px 30px rgba(80, 60, 30, 0.05);
         }
         .small-card h4 {
-            margin: 0 0 0.3rem 0;
-            color: #7a5420;
-            font-size: 1rem;
+            margin: 0 0 0.35rem 0;
+            color: #7a5722;
+            font-size: 1.6rem;
         }
         .small-card p {
             margin: 0;
+            line-height: 1.78;
+            font-size: 1.02rem;
+        }
+        .stat-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 16px;
+            margin: 0.6rem 0 1.3rem 0;
+        }
+        .stat-card {
+            padding: 1rem 1.15rem 1.1rem 1.15rem;
+            border-radius: 22px;
+            background: rgba(255, 252, 246, 0.96);
+            border: 1px solid rgba(104, 83, 53, 0.14);
+            box-shadow: 0 14px 34px rgba(80, 60, 30, 0.05);
+            min-height: 146px;
+        }
+        .stat-card .label {
+            color: #5b5141;
+            font-size: 0.98rem;
+            margin-bottom: 0.6rem;
+        }
+        .stat-card .value {
+            color: #241d17;
+            font-size: clamp(2rem, 2.8vw, 3.35rem);
+            line-height: 1.08;
+            font-weight: 700;
+            letter-spacing: -0.02em;
+            overflow-wrap: anywhere;
+        }
+        .stat-card .value.long {
+            font-size: clamp(1.2rem, 1.9vw, 1.9rem);
+            line-height: 1.28;
+        }
+        .stat-card .note {
+            margin-top: 0.55rem;
+            color: #8b7a60;
+            font-size: 0.84rem;
             line-height: 1.55;
         }
-        div[data-testid="metric-container"] {
-            background: rgba(255, 252, 245, 0.92);
-            border: 1px solid rgba(110, 92, 62, 0.14);
-            border-radius: 18px;
-            padding: 0.9rem 1rem;
+        .section-head {
+            margin: 1.25rem 0 0.85rem 0;
         }
-        /* ── 侧边栏 ── */
-        section[data-testid="stSidebar"] {
-            background: linear-gradient(180deg, #eeeae0 0%, #e5e1d5 100%);
-            border-right: 1px solid rgba(110, 92, 62, 0.12);
-        }
-        section[data-testid="stSidebar"] h2 {
-            font-size: 0.78rem;
+        .section-kicker {
+            display: inline-block;
+            padding: 0.24rem 0.72rem;
+            border-radius: 999px;
+            background: linear-gradient(135deg, rgba(193, 90, 72, 0.16), rgba(82, 123, 114, 0.13));
+            color: #8b4c3d;
+            font-size: 0.84rem;
             font-weight: 700;
-            letter-spacing: 0.09em;
-            text-transform: uppercase;
-            color: #8a7a60;
-            padding-bottom: 0.5rem;
-            border-bottom: 1px solid rgba(110, 92, 62, 0.15);
-            margin-bottom: 0.25rem;
+            letter-spacing: 0.04em;
+            margin-bottom: 0.45rem;
+        }
+        .section-head h3 {
+            margin: 0;
+            color: #2f3448;
+            font-size: 2rem;
+            line-height: 1.12;
+        }
+        .section-head p {
+            margin: 0.32rem 0 0 0;
+            color: #66594a;
+            line-height: 1.7;
+            max-width: 920px;
+        }
+        .feature-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 18px;
+            margin: 0.75rem 0 1.2rem 0;
+        }
+        .feature-block {
+            padding: 1rem 1.05rem;
+            border-radius: 20px;
+            background: rgba(255, 252, 246, 0.95);
+            border: 1px solid rgba(104, 83, 53, 0.14);
+            box-shadow: 0 10px 28px rgba(80, 60, 30, 0.04);
+        }
+        .feature-block h4 {
+            margin: 0 0 0.8rem 0;
+            color: #7a5722;
+            font-size: 1.1rem;
+        }
+        .chip-wrap {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+        .feature-chip {
+            display: inline-flex;
+            align-items: center;
+            padding: 0.38rem 0.66rem;
+            border-radius: 999px;
+            background: rgba(61, 111, 101, 0.09);
+            border: 1px solid rgba(61, 111, 101, 0.11);
+            color: #294a43;
+            font-size: 0.9rem;
+            line-height: 1.2;
+            overflow-wrap: anywhere;
+        }
+        .feature-empty {
+            color: #8b7a60;
+            font-size: 0.92rem;
+        }
+        .stDataFrame, div[data-testid="stDataFrame"] {
+            border-radius: 18px;
+            overflow: hidden;
+            border: 1px solid rgba(104, 83, 53, 0.12);
+        }
+        div[data-testid="metric-container"] {
+            background: rgba(255, 252, 246, 0.95);
+            border: 1px solid rgba(104, 83, 53, 0.14);
+            border-radius: 18px;
+            padding: 0.85rem 1rem;
+        }
+        section[data-testid="stSidebar"] {
+            background: linear-gradient(180deg, #efe8d9 0%, #e7decb 100%);
+            border-right: 1px solid rgba(104, 83, 53, 0.10);
         }
         section[data-testid="stSidebar"] .stRadio label {
-            padding: 0.45rem 0.75rem !important;
+            padding: 0.46rem 0.78rem !important;
             border-radius: 10px !important;
-            transition: background 0.15s;
-            font-size: 0.97rem;
-            color: #3a3020;
             margin: 2px 0 !important;
         }
-        section[data-testid="stSidebar"] .stRadio label:hover {
-            background: rgba(82, 106, 68, 0.10) !important;
-        }
         section[data-testid="stSidebar"] .stRadio label:has(input:checked) {
-            background: rgba(82, 106, 68, 0.20) !important;
+            background: rgba(61, 111, 101, 0.16) !important;
+            color: #294a43 !important;
             font-weight: 600;
-            color: #2e4a20 !important;
         }
-        /* ── 子页 Tab（下一天预测概览内部）── */
         .stTabs [data-baseweb="tab-list"] {
-            gap: 0;
-            background: transparent;
-            border-bottom: 2px solid rgba(110, 92, 62, 0.15);
-            margin-bottom: 1.2rem;
+            border-bottom: 2px solid rgba(104, 83, 53, 0.14);
+            margin-bottom: 1rem;
         }
         .stTabs [data-baseweb="tab"] {
-            height: 44px;
-            padding: 0 22px;
-            font-size: 1rem;
-            font-weight: 500;
-            color: #5a4e38;
-            background: transparent !important;
-            border: none !important;
+            height: 42px;
+            font-size: 0.98rem;
+            color: #5d513f;
             border-bottom: 3px solid transparent !important;
-            border-radius: 0 !important;
-            margin-bottom: -2px;
-            transition: color 0.15s;
         }
-        .stTabs [data-baseweb="tab"]:hover { color: #c94c4c; }
         .stTabs [aria-selected="true"] {
-            color: #c94c4c !important;
-            border-bottom: 3px solid #c94c4c !important;
+            color: #c15a48 !important;
+            border-bottom: 3px solid #c15a48 !important;
         }
-        .stTabs [data-baseweb="tab-highlight"],
-        .stTabs [data-baseweb="tab-border"] { display: none !important; }
-        .stTabs [data-baseweb="tab-panel"] { padding: 0 !important; }
         </style>
         """,
         unsafe_allow_html=True,
@@ -166,192 +300,619 @@ def inject_css() -> None:
 
 def render_panel(title: str, body: str) -> None:
     st.markdown(
-        f"""
-        <div class="panel">
-          <strong>{title}</strong><br/>
-          {body}
-        </div>
-        """,
+        f'<div class="panel"><strong>{escape(title)}</strong><br/>{body}</div>',
         unsafe_allow_html=True,
     )
 
 
 def render_cards(cards: list[tuple[str, str]]) -> None:
-    cols = st.columns(len(cards))
-    for col, (title, text) in zip(cols, cards):
-        with col:
-            st.markdown(
-                f"""
-                <div class="small-card">
-                  <h4>{title}</h4>
-                  <p>{text}</p>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
+    blocks = []
+    for title, text in cards:
+        blocks.append(
+            f'<div class="small-card"><h4>{escape(title)}</h4><p>{text}</p></div>'
+        )
+    st.markdown(f'<div class="card-grid">{"".join(blocks)}</div>', unsafe_allow_html=True)
+
+
+def render_stat_cards(cards: list[tuple[str, str, str | None]]) -> None:
+    blocks = []
+    for label, value, note in cards:
+        value_text = str(value)
+        value_class = "value long" if len(value_text) > 12 else "value"
+        note_html = f'<div class="note">{escape(note)}</div>' if note else ""
+        blocks.append(
+            f'<div class="stat-card"><div class="label">{escape(label)}</div><div class="{value_class}">{escape(value_text)}</div>{note_html}</div>'
+        )
+    st.markdown(f'<div class="stat-grid">{"".join(blocks)}</div>', unsafe_allow_html=True)
+
+
+def render_section_header(kicker: str, title: str, desc: str | None = None) -> None:
+    desc_html = f"<p>{escape(desc)}</p>" if desc else ""
+    st.markdown(
+        f'<div class="section-head"><div class="section-kicker">{escape(kicker)}</div><h3>{escape(title)}</h3>{desc_html}</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def render_feature_groups(groups: dict[str, list[str]]) -> None:
+    blocks = []
+    for title, items in groups.items():
+        chip_html = "".join(f'<span class="feature-chip">{escape(item)}</span>' for item in items)
+        if not chip_html:
+            chip_html = '<span class="feature-empty">暂无对应特征</span>'
+        blocks.append(
+            f'<div class="feature-block"><h4>{escape(title)}</h4><div class="chip-wrap">{chip_html}</div></div>'
+        )
+    st.markdown(f'<div class="feature-grid">{"".join(blocks)}</div>', unsafe_allow_html=True)
+
+
+def show_saved_figure(filename: str, caption: str) -> None:
+    path = FIGURE_DIR / filename
+    if not path.exists():
+        render_panel("图片缺失", f"未找到 {escape(filename)}，请先运行 `python scripts/generate_hourly_figures.py`。")
+        return
+    st.image(str(path), caption=caption, use_column_width=True)
 
 
 @st.cache_data(show_spinner=False)
-def get_predictions() -> pd.DataFrame:
-    return load_predictions()
+def load_csv(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        return pd.DataFrame()
+    return pd.read_csv(path)
 
 
 @st.cache_data(show_spinner=False)
-def get_beijing_daily() -> pd.DataFrame:
-    return pd.read_csv(BEIJING_DIR / "beijing_daily_city.csv", parse_dates=["date"]).sort_values("date")
+def load_overall_metrics() -> pd.DataFrame:
+    df = load_csv(OUTPUT_DIR / "overall_metrics_summary.csv")
+    if df.empty:
+        return df
+    df["horizon_hours"] = pd.to_numeric(df["horizon_hours"], errors="coerce")
+    return df
 
 
 @st.cache_data(show_spinner=False)
-def get_shanghai_aligned() -> pd.DataFrame:
-    return pd.read_csv(ALIGNED_DIR / "shanghai.csv", parse_dates=["date"]).sort_values("date")
+def load_predictions() -> pd.DataFrame:
+    files = [
+        "arima_predictions_h1.csv",
+        "arima_predictions_seq6.csv",
+        "prophet_predictions_h1.csv",
+        "prophet_predictions_seq6.csv",
+        "xgboost_predictions_h1.csv",
+        "xgboost_predictions_seq6.csv",
+        "lstm_predictions_h1.csv",
+        "lstm_predictions_seq6.csv",
+        "transformer_predictions_h1.csv",
+        "transformer_predictions_seq6.csv",
+    ]
+    frames: list[pd.DataFrame] = []
+    for filename in files:
+        df = load_csv(OUTPUT_DIR / filename)
+        if df.empty:
+            continue
+        if "split" in df.columns:
+            df = df[df["split"] == "test"].copy()
+        if "task" not in df.columns:
+            df["task"] = "seq6" if "seq6" in filename else "h1"
+        df["forecast_origin_time"] = pd.to_datetime(df["forecast_origin_time"])
+        df["target_time"] = pd.to_datetime(df["target_time"])
+        df["horizon_hours"] = pd.to_numeric(df["horizon_hours"], errors="coerce")
+        df["y_true"] = pd.to_numeric(df["y_true"], errors="coerce")
+        df["y_pred"] = pd.to_numeric(df["y_pred"], errors="coerce")
+        frames.append(df)
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True)
 
 
 @st.cache_data(show_spinner=False)
-def get_one_day_metrics() -> pd.DataFrame:
-    return compute_metric_frame(get_predictions())
+def load_hourly_data() -> pd.DataFrame:
+    df = load_csv(PROCESSED_DIR / "beijing_hourly.csv")
+    if df.empty:
+        return df
+    df["datetime"] = pd.to_datetime(df["datetime"])
+    return df.sort_values("datetime").reset_index(drop=True)
 
 
-def summarize_dataset(df: pd.DataFrame, date_col: str, target_col: str) -> dict[str, str | int | float]:
+@st.cache_data(show_spinner=False)
+def load_feature_names() -> list[str]:
+    path = FEATURE_DIR / "feature_names.json"
+    if not path.exists():
+        return []
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+@st.cache_data(show_spinner=False)
+def load_feature_matrix_meta() -> dict[str, int]:
+    X_train = np.load(FEATURE_DIR / "X_train.npy")
+    X_test = np.load(FEATURE_DIR / "X_test.npy")
+    y_train = np.load(FEATURE_DIR / "y_train.npy")
+    y_test = np.load(FEATURE_DIR / "y_test.npy")
+    dates_train = np.load(FEATURE_DIR / "dates_train.npy", allow_pickle=True)
+    dates_test = np.load(FEATURE_DIR / "dates_test.npy", allow_pickle=True)
     return {
-        "start": df[date_col].min().strftime("%Y-%m-%d"),
-        "end": df[date_col].max().strftime("%Y-%m-%d"),
-        "rows": int(len(df)),
-        "target_mean": float(df[target_col].mean()),
-        "target_max": float(df[target_col].max()),
+        "n_train": int(X_train.shape[0]),
+        "n_test": int(X_test.shape[0]),
+        "n_features": int(X_train.shape[1]),
+        "train_start": str(dates_train[0]),
+        "train_end": str(dates_train[-1]),
+        "test_start": str(dates_test[0]),
+        "test_end": str(dates_test[-1]),
+        "y_train_mean": float(np.mean(y_train)),
+        "y_test_mean": float(np.mean(y_test)),
     }
-
-
-def format_metric_table(metric_df: pd.DataFrame, metric_name: str) -> pd.DataFrame:
-    table = metric_df.sort_values(metric_name).copy()
-    best_value = float(table.iloc[0][metric_name])
-    table["与最优差值"] = (table[metric_name] - best_value).round(2)
-    table["RMSE"] = table["rmse"].round(2)
-    table["MAE"] = table["mae"].round(2)
-    table["MAPE"] = table["mape"].round(2)
-    table["样本数"] = table["n"].astype(int)
-    table["排名"] = range(1, len(table) + 1)
-    table["模型"] = table["model"].astype(str)
-    return table[["排名", "模型", "RMSE", "MAE", "MAPE", "样本数", "与最优差值"]]
-
-
-def build_demo_training_frame(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
-    frame = df[["date", "PM2.5"]].copy()
-    frame["month"] = frame["date"].dt.month
-    frame["dayofweek"] = frame["date"].dt.dayofweek
-    frame["dayofyear"] = frame["date"].dt.dayofyear
-    frame["is_month_start"] = frame["date"].dt.is_month_start.astype(int)
-    frame["is_month_end"] = frame["date"].dt.is_month_end.astype(int)
-
-    for lag in [1, 2, 3, 7, 14, 21, 28]:
-        frame[f"lag_{lag}"] = frame["PM2.5"].shift(lag)
-
-    shifted = frame["PM2.5"].shift(1)
-    for window in [3, 7, 14, 28]:
-        frame[f"roll_mean_{window}"] = shifted.rolling(window).mean()
-        frame[f"roll_std_{window}"] = shifted.rolling(window).std()
-        frame[f"roll_max_{window}"] = shifted.rolling(window).max()
-
-    frame["target"] = frame["PM2.5"].shift(-1)
-    feature_cols = [col for col in frame.columns if col not in {"date", "PM2.5", "target"}]
-    frame = frame.dropna().reset_index(drop=True)
-    return frame, feature_cols
 
 
 @st.cache_resource(show_spinner=False)
-def get_demo_forecast_model() -> tuple[xgb.XGBRegressor, list[str]]:
-    daily = get_beijing_daily()
-    train_frame, feature_cols = build_demo_training_frame(daily)
-    model = xgb.XGBRegressor(
-        objective="reg:squarederror",
-        eval_metric="rmse",
-        n_estimators=260,
-        max_depth=4,
-        learning_rate=0.05,
-        subsample=0.9,
-        colsample_bytree=0.9,
-        reg_alpha=0.001,
-        reg_lambda=1.0,
-        n_jobs=1,
-        seed=42,
-        verbosity=0,
+def rebuild_hourly_scaler(feature_names: tuple[str, ...]) -> StandardScaler:
+    raw = load_hourly_data()
+    if raw.empty:
+        raise FileNotFoundError("缺少 data/processed/beijing_hourly.csv，无法重建实时预测 scaler。")
+
+    frame, _ = build_hourly_feature_frame(raw)
+    model_frame = frame.dropna(subset=list(feature_names) + ["pm25"]).reset_index(drop=True)
+    if model_frame.empty:
+        raise ValueError("重建实时预测 scaler 失败：特征工程后没有可用样本。")
+
+    split_index = int(len(model_frame) * 0.8)
+    train_frame = model_frame.iloc[:split_index]
+    scaler = StandardScaler()
+    scaler.fit(train_frame[list(feature_names)].to_numpy(dtype=np.float64))
+    return scaler
+
+
+@st.cache_resource(show_spinner=False)
+def load_realtime_assets():
+    with open(FEATURE_DIR / "feature_names.json", encoding="utf-8") as handle:
+        feature_names = json.load(handle)
+    try:
+        with open(FEATURE_DIR / "scaler.pkl", "rb") as handle:
+            scaler = pickle.load(handle)
+    except Exception:
+        scaler = rebuild_hourly_scaler(tuple(feature_names))
+    with open(OUTPUT_DIR / "lstm_h1_config.json", encoding="utf-8") as handle:
+        lstm_config = json.load(handle)
+    lstm_model = LSTMModel(
+        input_dim=len(feature_names),
+        hidden_dim=int(lstm_config["hidden_dim"]),
+        num_layers=int(lstm_config["num_layers"]),
+        dropout=float(lstm_config["dropout"]),
+        output_dim=int(lstm_config["output_len"]),
     )
-    model.fit(train_frame[feature_cols], train_frame["target"], verbose=False)
-    return model, feature_cols
+    lstm_trainer = LSTMTrainer.load(OUTPUT_DIR / "lstm_h1.pkl", model=lstm_model)
+    lstm_trainer.model.eval()
+
+    transformer_checkpoint = torch.load(
+        OUTPUT_DIR / "transformer_seq6.pt",
+        map_location="cpu",
+        weights_only=False,
+    )
+    transformer_model = TimeSeriesTransformer(**transformer_checkpoint["config"])
+    transformer_model.load_state_dict(transformer_checkpoint["model_state_dict"])
+    transformer_model.eval()
+    return scaler, feature_names, lstm_config, lstm_trainer.model, transformer_checkpoint["config"], transformer_model
 
 
-def build_feature_row(history_df: pd.DataFrame, next_date: pd.Timestamp, feature_cols: list[str]) -> pd.DataFrame:
-    pm = history_df["PM2.5"].astype(float)
-    row: dict[str, float | int] = {
-        "month": next_date.month,
-        "dayofweek": next_date.dayofweek,
-        "dayofyear": next_date.dayofyear,
-        "is_month_start": int(next_date.is_month_start),
-        "is_month_end": int(next_date.is_month_end),
-    }
-    for lag in [1, 2, 3, 7, 14, 21, 28]:
-        row[f"lag_{lag}"] = float(pm.iloc[-lag])
-    for window in [3, 7, 14, 28]:
-        recent = pm.iloc[-window:]
-        row[f"roll_mean_{window}"] = float(recent.mean())
-        row[f"roll_std_{window}"] = float(recent.std(ddof=0))
-        row[f"roll_max_{window}"] = float(recent.max())
-    return pd.DataFrame([[row[col] for col in feature_cols]], columns=feature_cols)
+def dedupe_metrics(df: pd.DataFrame, task: str) -> pd.DataFrame:
+    if df.empty:
+        return df
+    if task == "h1":
+        sub = df[(df["task"] == "h1") & (df["horizon_hours"] == 1)].copy()
+    elif task == "seq6":
+        sub = df[df["task"] == "seq6"].copy()
+    else:
+        sub = df[df["task"] == "seq6_mean"].copy()
+    return sub.sort_values(["model", "task", "horizon_hours", "rmse"]).drop_duplicates(
+        subset=["model", "task", "horizon_hours"],
+        keep="first",
+    )
 
 
-def recursive_demo_forecast(history_df: pd.DataFrame, steps: int = 7) -> pd.DataFrame:
-    model, feature_cols = get_demo_forecast_model()
-    history = history_df[["date", "PM2.5"]].copy().sort_values("date").reset_index(drop=True)
-
-    results: list[dict[str, str | float | int]] = []
-    for horizon in range(1, steps + 1):
-        next_date = history["date"].iloc[-1] + pd.Timedelta(days=1)
-        feature_row = build_feature_row(history, next_date, feature_cols)
-        pred = max(0.0, float(model.predict(feature_row)[0]))
-        results.append(
-            {
-                "日期": next_date.strftime("%Y-%m-%d"),
-                "预测步长": f"第{horizon}天",
-                "预测PM2.5": round(pred, 2),
-            }
-        )
-        history.loc[len(history)] = {"date": next_date, "PM2.5": pred}
-    return pd.DataFrame(results)
+def format_metric_table(df: pd.DataFrame, include_horizon: bool = False) -> pd.DataFrame:
+    if df.empty:
+        return df
+    table = df.sort_values("rmse").copy()
+    table["排名"] = range(1, len(table) + 1)
+    table["RMSE"] = table["rmse"].round(2)
+    table["MAE"] = table["mae"].round(2)
+    table["MAPE"] = table["mape"].round(2)
+    table["样本数"] = table["n_samples"].astype(int)
+    keep = ["排名", "model", "RMSE", "MAE", "MAPE", "样本数"]
+    rename = {"model": "模型"}
+    if include_horizon:
+        table["步长"] = table["horizon_hours"].astype(int)
+        keep.insert(2, "步长")
+    return table[keep].rename(columns=rename)
 
 
-def plot_demo_forecast(history_df: pd.DataFrame, forecast_df: pd.DataFrame) -> plt.Figure:
-    plt.rcParams["font.family"] = ["Microsoft YaHei", "SimHei", "DejaVu Sans"]
-    fig, ax = plt.subplots(figsize=(12, 5.5))
-    recent_history = history_df.tail(30)
-    ax.plot(recent_history["date"], recent_history["PM2.5"], color="#1f1f1f", linewidth=2.4, label="历史PM2.5")
-    future_dates = pd.to_datetime(forecast_df["日期"])
-    future_values = forecast_df["预测PM2.5"].astype(float)
-    ax.plot(future_dates, future_values, color="#d15656", marker="o", linewidth=2.2, label="未来7天预测")
-    ax.axvline(recent_history["date"].iloc[-1], linestyle="--", color="#8a7a64", linewidth=1.2)
-    ax.set_title("下一天与未来七天 PM2.5 演示预测")
-    ax.set_xlabel("日期")
-    ax.set_ylabel("PM2.5")
-    ax.legend(frameon=False)
-    ax.spines[["top", "right"]].set_visible(False)
-    fig.autofmt_xdate()
+def get_best_row(df: pd.DataFrame) -> pd.Series | None:
+    if df.empty:
+        return None
+    return df.sort_values("rmse").iloc[0]
+
+
+def to_summary_markdown(best_h1: pd.Series | None, best_seq6: pd.Series | None, seq6_df: pd.DataFrame) -> str:
+    lines = []
+    if best_h1 is not None:
+        lines.append(f"- h1 最优模型：`{best_h1['model']}`，RMSE `{best_h1['rmse']:.3f}`，MAE `{best_h1['mae']:.3f}`。")
+    if best_seq6 is not None:
+        lines.append(f"- 未来 6 小时平均表现最优模型：`{best_seq6['model']}`，RMSE `{best_seq6['rmse']:.3f}`，MAE `{best_seq6['mae']:.3f}`。")
+    xgb = seq6_df[seq6_df["model"] == "XGBoost"].sort_values("horizon_hours")
+    if not xgb.empty:
+        trend = "基本单调上升" if xgb["rmse"].is_monotonic_increasing else "并非严格单调"
+        values = "，".join(f"h{int(row.horizon_hours)}={row.rmse:.2f}" for row in xgb.itertuples())
+        lines.append(f"- XGBoost 在 6 小时序列任务上的 RMSE 随步长 {trend}：{values}。")
+    return "\n".join(lines)
+
+
+def draw_metric_bars(df: pd.DataFrame) -> plt.Figure:
+    fig, axes = plt.subplots(1, 3, figsize=(14, 4.8))
+    if df.empty:
+        for ax in axes:
+            ax.text(0.5, 0.5, "暂无指标", ha="center", va="center")
+            ax.axis("off")
+        return fig
+
+    plot_df = df.copy()
+    plot_df["标签"] = plot_df["model"] + " · " + plot_df["task"]
+    for ax, metric in zip(axes, ["rmse", "mae", "mape"]):
+        ordered = plot_df.sort_values(metric)
+        colors = [MODEL_COLORS.get(model, "#888888") for model in ordered["model"]]
+        ax.barh(ordered["标签"], ordered[metric], color=colors, alpha=0.92)
+        ax.set_title(metric.upper(), fontsize=13, weight="bold")
+        ax.grid(axis="x", alpha=0.22, linestyle="--")
+        ax.invert_yaxis()
+        ax.spines[["top", "right"]].set_visible(False)
+    fig.tight_layout()
     return fig
 
 
+def draw_prediction_curve(df: pd.DataFrame, models: list[str], horizon: int, max_points: int = 168) -> plt.Figure:
+    fig, ax = plt.subplots(figsize=(12.5, 5.2))
+    sub = df[(df["horizon_hours"] == horizon) & (df["model"].isin(models))].copy()
+    if sub.empty:
+        ax.text(0.5, 0.5, "当前筛选条件下没有可展示的预测数据", ha="center", va="center")
+        ax.axis("off")
+        return fig
+
+    truth = sub[["target_time", "y_true"]].drop_duplicates().sort_values("target_time").tail(max_points)
+    ax.plot(
+        truth["target_time"],
+        truth["y_true"],
+        color="#1f1f1f",
+        linewidth=2.8,
+        label="真实值",
+        zorder=5,
+    )
+
+    for model in models:
+        model_df = sub[sub["model"] == model][["target_time", "y_pred"]]
+        model_df = model_df[model_df["target_time"].isin(truth["target_time"])].sort_values("target_time")
+        if model_df.empty:
+            continue
+        ax.plot(
+            model_df["target_time"],
+            model_df["y_pred"],
+            linewidth=2.1,
+            color=MODEL_COLORS.get(model, "#888888"),
+            alpha=0.95,
+            label=model,
+        )
+
+    ax.set_title(f"最近 {len(truth)} 个点的预测曲线对比（h{horizon}）", fontsize=14, weight="bold")
+    ax.set_xlabel("目标时刻")
+    ax.set_ylabel("PM2.5")
+    ax.grid(alpha=0.18, linestyle="--")
+    ax.legend(ncol=6, frameon=False, fontsize=9, loc="upper left")
+    ax.spines[["top", "right"]].set_visible(False)
+    fig.autofmt_xdate()
+    fig.tight_layout()
+    return fig
+
+
+def draw_seq6_curve(seq6_df: pd.DataFrame, models: list[str]) -> plt.Figure:
+    fig, ax = plt.subplots(figsize=(10.8, 4.9))
+    sub = seq6_df[seq6_df["model"].isin(models)].copy()
+    if sub.empty:
+        ax.text(0.5, 0.5, "暂无 6 小时序列分步结果", ha="center", va="center")
+        ax.axis("off")
+        return fig
+
+    for model in models:
+        model_df = sub[sub["model"] == model].sort_values("horizon_hours")
+        if model_df.empty:
+            continue
+        ax.plot(
+            model_df["horizon_hours"],
+            model_df["rmse"],
+            marker="o",
+            markersize=6,
+            linewidth=2.4,
+            color=MODEL_COLORS.get(model, "#888888"),
+            label=model,
+        )
+    ax.set_title("未来 6 小时逐步 RMSE 变化", fontsize=14, weight="bold")
+    ax.set_xlabel("预测步长（小时）")
+    ax.set_ylabel("RMSE")
+    ax.set_xticks([1, 2, 3, 4, 5, 6])
+    ax.grid(alpha=0.2, linestyle="--")
+    ax.legend(frameon=False, ncol=5)
+    ax.spines[["top", "right"]].set_visible(False)
+    fig.tight_layout()
+    return fig
+
+
+def draw_aqi_bucket(df: pd.DataFrame, task: str, horizon: int) -> plt.Figure:
+    fig, ax = plt.subplots(figsize=(11.2, 4.9))
+    sub = df[(df["task"] == task) & (df["horizon_hours"] == horizon)].copy()
+    if sub.empty:
+        ax.text(0.5, 0.5, "当前条件下没有 AQI 分层结果", ha="center", va="center")
+        ax.axis("off")
+        return fig
+
+    bucket_order = ["0-35", "35-75", "75-115", "115-150", ">150"]
+    for model in sub["model"].drop_duplicates():
+        model_df = sub[sub["model"] == model].copy()
+        model_df["aqi_bucket"] = pd.Categorical(model_df["aqi_bucket"], bucket_order, ordered=True)
+        model_df = model_df.sort_values("aqi_bucket")
+        ax.plot(
+            model_df["aqi_bucket"].astype(str),
+            model_df["rmse"],
+            marker="o",
+            linewidth=2.2,
+            color=MODEL_COLORS.get(model, "#888888"),
+            label=model,
+        )
+
+    ax.set_title(f"AQI 分层误差对比（{task}，h{horizon}）", fontsize=14, weight="bold")
+    ax.set_xlabel("AQI 分层")
+    ax.set_ylabel("RMSE")
+    ax.grid(axis="y", alpha=0.18, linestyle="--")
+    ax.legend(frameon=False, ncol=3)
+    ax.spines[["top", "right"]].set_visible(False)
+    fig.tight_layout()
+    return fig
+
+
+def draw_feature_importance(path: Path, title: str) -> plt.Figure:
+    fig, ax = plt.subplots(figsize=(9, 6))
+    df = load_csv(path)
+    if df.empty:
+        ax.text(0.5, 0.5, "暂无特征重要性结果", ha="center", va="center")
+        ax.axis("off")
+        return fig
+
+    top = df.head(18).iloc[::-1]
+    values = top["gain_norm"] if "gain_norm" in top.columns else top["gain"]
+    ax.barh(top["feature"], values, color="#2f8078", alpha=0.92)
+    ax.set_title(title, fontsize=14, weight="bold")
+    ax.set_xlabel("相对重要性")
+    ax.grid(axis="x", alpha=0.18, linestyle="--")
+    ax.spines[["top", "right"]].set_visible(False)
+    fig.tight_layout()
+    return fig
+
+
+def draw_feature_ablation(df: pd.DataFrame, task: str) -> plt.Figure:
+    fig, ax = plt.subplots(figsize=(10.8, 4.9))
+    if df.empty:
+        ax.text(0.5, 0.5, "暂无特征消融结果", ha="center", va="center")
+        ax.axis("off")
+        return fig
+
+    order = ["base_short_lag", "base_plus_daily_cycle", "mid_range_memory", "trend_and_roll", "weather_enhanced", "full_48"]
+    if task == "h1":
+        sub = df[(df["task"] == "h1") & (df["horizon_hours"] == 1)].copy()
+    else:
+        sub = df[df["task"] == "seq6"].groupby("feature_group", as_index=False)["rmse"].mean()
+    sub["feature_group"] = pd.Categorical(sub["feature_group"], order, ordered=True)
+    sub = sub.sort_values("feature_group")
+
+    ax.plot(
+        sub["feature_group"].astype(str),
+        sub["rmse"],
+        marker="o",
+        markersize=6,
+        linewidth=2.4,
+        color="#d49d2d",
+    )
+    ax.set_title("XGBoost 特征消融结果", fontsize=14, weight="bold")
+    ax.set_xlabel("特征组")
+    ax.set_ylabel("RMSE")
+    ax.tick_params(axis="x", rotation=18)
+    ax.grid(axis="y", alpha=0.18, linestyle="--")
+    ax.spines[["top", "right"]].set_visible(False)
+    fig.tight_layout()
+    return fig
+
+
+def draw_high_pollution(df: pd.DataFrame) -> plt.Figure:
+    fig, ax = plt.subplots(figsize=(10.8, 4.8))
+    if df.empty:
+        ax.text(0.5, 0.5, "暂无高污染结果", ha="center", va="center")
+        ax.axis("off")
+        return fig
+
+    sub = df.copy()
+    sub["标签"] = sub["model"] + " · " + sub["task"] + " · h" + sub["horizon_hours"].astype(int).astype(str)
+    ordered = sub.sort_values("rmse")
+    colors = [MODEL_COLORS.get(model, "#888888") for model in ordered["model"]]
+    ax.barh(ordered["标签"], ordered["rmse"], color=colors, alpha=0.92)
+    ax.set_title("高污染样本误差对比（PM2.5 > 150）", fontsize=14, weight="bold")
+    ax.set_xlabel("RMSE")
+    ax.grid(axis="x", alpha=0.18, linestyle="--")
+    ax.invert_yaxis()
+    ax.spines[["top", "right"]].set_visible(False)
+    fig.tight_layout()
+    return fig
+
+
+def draw_hourly_error(df: pd.DataFrame, task: str, horizon: int, models: list[str]) -> plt.Figure:
+    fig, ax = plt.subplots(figsize=(11.2, 4.8))
+    sub = df[(df["task"] == task) & (df["horizon_hours"] == horizon) & (df["model"].isin(models))].copy()
+    if sub.empty:
+        ax.text(0.5, 0.5, "暂无分小时误差结果", ha="center", va="center")
+        ax.axis("off")
+        return fig
+
+    for model in models:
+        model_df = sub[sub["model"] == model].sort_values("hour")
+        if model_df.empty:
+            continue
+        ax.plot(
+            model_df["hour"],
+            model_df["mae"],
+            linewidth=2.1,
+            color=MODEL_COLORS.get(model, "#888888"),
+            label=model,
+        )
+
+    ax.set_title(f"按小时 MAE 变化（{task}，h{horizon}）", fontsize=14, weight="bold")
+    ax.set_xlabel("小时")
+    ax.set_ylabel("MAE")
+    ax.set_xticks(range(0, 24, 2))
+    ax.grid(alpha=0.18, linestyle="--")
+    ax.legend(frameon=False, ncol=5)
+    ax.spines[["top", "right"]].set_visible(False)
+    fig.tight_layout()
+    return fig
+
+
+def draw_cross_city(df: pd.DataFrame) -> plt.Figure:
+    fig, ax = plt.subplots(figsize=(9, 4.8))
+    if df.empty:
+        ax.text(0.5, 0.5, "暂无跨城市泛化结果", ha="center", va="center")
+        ax.axis("off")
+        return fig
+
+    sub = df.copy()
+    sub["标签"] = sub["task"] + "-h" + sub["horizon_hours"].astype(int).astype(str)
+    ax.bar(sub["标签"], sub["rmse"], color="#5e73b9", alpha=0.9)
+    ax.set_title("跨城市泛化：北京训练，上海测试", fontsize=14, weight="bold")
+    ax.set_ylabel("RMSE")
+    ax.grid(axis="y", alpha=0.18, linestyle="--")
+    ax.spines[["top", "right"]].set_visible(False)
+    fig.tight_layout()
+    return fig
+
+
+def hourly_data_summary(df: pd.DataFrame) -> dict[str, str | int | float]:
+    return {
+        "rows": int(len(df)),
+        "start": df["datetime"].min().strftime("%Y-%m-%d %H:%M"),
+        "end": df["datetime"].max().strftime("%Y-%m-%d %H:%M"),
+        "pm25_mean": float(df["pm25"].mean()),
+        "pm25_max": float(df["pm25"].max()),
+    }
+
+
+def get_realtime_default_table(df: pd.DataFrame, n_rows: int = 120) -> pd.DataFrame:
+    default = df[REALTIME_COLUMNS].tail(n_rows).copy().reset_index(drop=True)
+    default["datetime"] = default["datetime"].dt.strftime("%Y-%m-%d %H:%M:%S")
+    return default
+
+
+def run_realtime_prediction(input_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    work = input_df.copy()
+    work["datetime"] = pd.to_datetime(work["datetime"])
+    for col in ["pm25", "temp", "pres", "dewp", "humidity", "wind_speed", "precipitation"]:
+        work[col] = pd.to_numeric(work[col], errors="coerce")
+    work = work.sort_values("datetime").reset_index(drop=True)
+
+    scaler, feature_names, lstm_config, lstm_h1_model, transformer_config, transformer_seq6_model = load_realtime_assets()
+    frame, _ = build_hourly_feature_frame(work)
+    valid = frame.dropna(subset=feature_names).reset_index(drop=True)
+
+    seq_len_h1 = int(lstm_config["seq_len"])
+    seq_len_seq6 = int(transformer_config["seq_len"])
+    min_feature_rows = max(seq_len_h1, seq_len_seq6)
+    if len(valid) < min_feature_rows:
+        raise ValueError(
+            f"输入数据不足：至少需要 {min_feature_rows + 24} 小时原始观测，"
+            f"当前仅能构造 {len(valid)} 条有效特征行。"
+        )
+
+    scaled = scaler.transform(valid[feature_names].to_numpy(dtype=np.float64)).astype(np.float32)
+    base_time = pd.to_datetime(valid["datetime"].iloc[-1])
+
+    h1_window = torch.from_numpy(scaled[-seq_len_h1:]).unsqueeze(0)
+    seq6_window = torch.from_numpy(scaled[-seq_len_seq6:]).unsqueeze(0)
+
+    with torch.no_grad():
+        h1_value = max(0.0, float(lstm_h1_model(h1_window).cpu().numpy().reshape(-1)[0]))
+        seq6_raw = transformer_seq6_model(seq6_window).cpu().numpy().reshape(-1)
+    seq6_values = [max(0.0, float(value)) for value in seq6_raw.tolist()]
+
+    summary = pd.DataFrame(
+        [
+            {"任务": "h1 单步预测（LSTM）", "预测值": round(h1_value, 2)},
+            {"任务": "未来 6 小时均值（Transformer）", "预测值": round(float(np.mean(seq6_values)), 2)},
+            {"任务": "未来 6 小时峰值（Transformer）", "预测值": round(float(np.max(seq6_values)), 2)},
+        ]
+    )
+
+    detail = pd.DataFrame(
+        {
+            "目标时刻": [(base_time + pd.Timedelta(hours=h)).strftime("%Y-%m-%d %H:%M:%S") for h in range(1, 7)],
+            "预测步长": [f"h{h}" for h in range(1, 7)],
+            "预测 PM2.5": [round(value, 2) for value in seq6_values],
+        }
+    )
+    return summary, detail
+
+
+def draw_realtime_forecast(detail: pd.DataFrame) -> plt.Figure:
+    fig, ax = plt.subplots(figsize=(10, 4.8))
+    ax.plot(
+        detail["预测步长"],
+        detail["预测 PM2.5"],
+        marker="o",
+        markersize=7,
+        linewidth=2.5,
+        color="#2f8078",
+    )
+    ax.fill_between(detail["预测步长"], detail["预测 PM2.5"], color="#2f8078", alpha=0.12)
+    ax.set_title("未来 6 小时实时预测结果", fontsize=14, weight="bold")
+    ax.set_xlabel("预测步长")
+    ax.set_ylabel("预测 PM2.5")
+    ax.grid(alpha=0.2, linestyle="--")
+    ax.spines[["top", "right"]].set_visible(False)
+    fig.tight_layout()
+    return fig
+
+
+set_plot_style()
 inject_css()
 
-predictions = get_predictions()
-beijing_daily = get_beijing_daily()
-shanghai_aligned = get_shanghai_aligned()
-metric_frame = get_one_day_metrics()
+overall_metrics = load_overall_metrics()
+predictions = load_predictions()
+hourly_df = load_hourly_data()
+feature_names = load_feature_names()
+feature_meta = load_feature_matrix_meta()
+aqi_bucket = load_csv(OUTPUT_DIR / "aqi_bucket_metrics.csv")
+feature_ablation = load_csv(OUTPUT_DIR / "feature_ablation.csv")
+high_pollution = load_csv(OUTPUT_DIR / "high_pollution_error_analysis.csv")
+hourly_error = load_csv(OUTPUT_DIR / "hourly_error_by_hour.csv")
+dayperiod_error = load_csv(OUTPUT_DIR / "hourly_error_by_dayperiod.csv")
+cross_city = load_csv(OUTPUT_DIR / "cross_city_metrics.csv")
+registry = load_csv(OUTPUT_DIR / "experiment_registry.csv")
 
-beijing_summary = summarize_dataset(beijing_daily, "date", "PM2.5")
-shanghai_summary = summarize_dataset(shanghai_aligned, "date", "pm25")
+h1_metrics = dedupe_metrics(overall_metrics, "h1")
+seq6_metrics = dedupe_metrics(overall_metrics, "seq6")
+seq6_mean = dedupe_metrics(overall_metrics, "seq6_mean")
+summary_metrics = pd.concat([h1_metrics.assign(task="h1"), seq6_mean.assign(task="seq6_mean")], ignore_index=True)
+
+best_h1 = get_best_row(h1_metrics)
+best_seq6 = get_best_row(seq6_mean)
+summary_text = to_summary_markdown(best_h1, best_seq6, seq6_metrics)
+all_models = sorted(predictions["model"].dropna().unique().tolist()) if not predictions.empty else []
+hourly_info = hourly_data_summary(hourly_df)
 
 st.markdown(
     """
     <div class="hero">
-      <h1>AQI 项目展示系统</h1>
-      <p>这是面向课程答辩和组内查看的中文版页面。当前重点展示项目总览、下一天预测结果，以及一个可交互的演示预测入口。</p>
-      <p>项目主目标是利用历史空气质量与气象数据预测北京 PM2.5；现阶段已经完成下一天预测模块，未来七天预测模块预留给后续实验继续接入。</p>
+      <h1>小时级 PM2.5 实验展示系统</h1>
+      <p>本页面围绕当前已经完成的真实实验产物构建，展示数据处理与特征工程、h1 单步预测、未来 6 小时逐小时预测、误差分析与实时预测。</p>
+      <p>所有指标和图表都直接读取 <code>outputs/hourly</code> 与 <code>data/processed/features_hourly</code> 中的结果，不使用占位数据或过期页面文案。</p>
     </div>
     """,
     unsafe_allow_html=True,
@@ -361,282 +922,290 @@ with st.sidebar:
     st.markdown("## 导航")
     current_page = st.radio(
         "页面导航",
-        ["📊  项目总览", "📈  下一天预测概览", "🔮  七天预测", "🤖  实际预测"],
+        ["实验总览", "数据处理与特征工程", "h1 单步预测", "6 小时序列预测", "深入分析", "真实预测"],
         label_visibility="collapsed",
     )
 
-if current_page == "📊  项目总览":
-    st.subheader("项目总览")
-    st.write('这个项目目前包含两条主线：一条是已经完成的"下一天 PM2.5 预测"，另一条是准备扩展的"未来七天 PM2.5 预测"。')
+if current_page == "实验总览":
+    st.subheader("实验总览")
 
-    metric_col_1, metric_col_2, metric_col_3, metric_col_4 = st.columns(4)
-    metric_col_1.metric("北京日级样本数", f"{beijing_summary['rows']}")
-    metric_col_2.metric("北京时间范围", f"{beijing_summary['start']} ~ {beijing_summary['end']}")
-    metric_col_3.metric("上海对齐样本数", f"{shanghai_summary['rows']}")
-    metric_col_4.metric("当前对比模型数", f"{predictions['model'].nunique()}")
+    render_stat_cards(
+        [
+            ("小时级样本数", f"{hourly_info['rows']}", "统一按小时排序后进入建模流程"),
+            ("特征维度", f"{feature_meta['n_features']}", "当前特征工程共输出 48 维输入"),
+            ("h1 最优模型", best_h1["model"] if best_h1 is not None else "-", "按 RMSE 排名"),
+            ("6 小时均值最优模型", best_seq6["model"] if best_seq6 is not None else "-", "按 seq6 平均 RMSE 排名"),
+        ]
+    )
 
     render_cards(
         [
             (
-                "北京主实验数据",
-                f"时间范围为 {beijing_summary['start']} 至 {beijing_summary['end']}，共 {beijing_summary['rows']} 条日级样本，是当前建模主数据集。",
+                "h1 结论",
+                f"当前 h1 单步预测中，{best_h1['model']} 表现最好，RMSE 为 {best_h1['rmse']:.2f}，MAE 为 {best_h1['mae']:.2f}。"
+                if best_h1 is not None
+                else "当前暂无 h1 指标。",
             ),
             (
-                "上海对齐数据",
-                f"时间范围为 {shanghai_summary['start']} 至 {shanghai_summary['end']}，共 {shanghai_summary['rows']} 条，用于跨城市泛化或迁移对比。",
+                "6 小时序列结论",
+                f"未来 6 小时逐小时预测中，{best_seq6['model']} 的平均表现最优，RMSE 为 {best_seq6['rmse']:.2f}。"
+                if best_seq6 is not None
+                else "当前暂无 6 小时序列指标。",
             ),
             (
-                "当前完成情况",
-                "下一天预测已经完成 6 个模型的统一评估；未来七天预测实验计划已确定，等待新增结果接入。",
+                "模型结构",
+                "本轮对比包含 ARIMA、Prophet、XGBoost、LSTM 和 Transformer 五类模型，覆盖统计模型、树模型和深度学习模型。",
             ),
         ]
     )
 
-    left, right = st.columns([1.1, 0.9])
+    left, right = st.columns([1.15, 0.85])
     with left:
-        render_panel(
-            "数据集说明",
-            "北京数据为项目主实验数据，目标是预测日级 PM2.5；上海对齐数据主要用于后续跨城市迁移或泛化分析。"
-            "<br/>当前主要使用的建模字段包括 PM2.5、PM10、SO2、NO2、CO、O3、TEMP、PRES、DEWP、RAIN、WSPM。",
-        )
-        render_panel(
-            "数据处理方法",
-            "1. 原始小时级数据清洗与统一字段映射。"
-            "<br/>2. 短缺口插值，长缺口保留，避免制造假信号。"
-            "<br/>3. 小时级聚合为城市级，再聚合到日级数据。"
-            "<br/>4. 构造滞后特征、滚动统计特征和时间特征。"
-            "<br/>5. 按时间顺序划分训练集与测试集，后 20% 作为测试集。",
-        )
+        render_section_header("图 3", "模型整体指标比较", "当前展示的是最新汇总结果生成的整体指标图，已包含增强版 Prophet。")
+        show_saved_figure("fig07_overall_rmse.png", "图 3a  Overall RMSE comparison")
+        show_saved_figure("fig08_overall_mae.png", "图 3b  Overall MAE comparison")
+        show_saved_figure("fig09_overall_mape.png", "图 3c  Overall MAPE comparison")
+        st.markdown("### 指标明细表")
+        st.dataframe(format_metric_table(summary_metrics), use_container_width=True, hide_index=True)
     with right:
-        st.subheader("数据预览")
-        dataset_choice = st.radio("查看数据集", ["北京日级数据", "上海对齐数据"], horizontal=True)
-        preview_rows = st.slider("预览行数", min_value=5, max_value=20, value=8, step=1, key="overview_preview")
-        if dataset_choice == "北京日级数据":
-            preview = beijing_daily.head(preview_rows).copy()
-        else:
-            preview = shanghai_aligned.head(preview_rows).copy()
-        st.dataframe(preview, use_container_width=True, hide_index=True)
-
-    st.subheader("当前项目方法概览")
-    overview_table = pd.DataFrame(
-        {
-            "模块": ["数据处理", "单步预测", "多步预测", "评估分析"],
-            "当前状态": ["已完成", "已完成", "待补充", "已完成基础版"],
-            "说明": [
-                "已完成清洗、聚合、对齐与特征工程",
-                "已完成 ARIMA / Prophet / XGBoost / LSTM / Informer / Transformer",
-                "计划新增未来7天 PM2.5 预测实验",
-                "已完成整体误差、AQI分层误差与图表输出",
-            ],
-        }
-    )
-    st.dataframe(overview_table, use_container_width=True, hide_index=True)
-
-elif current_page == “📈  下一天预测概览”:
-    st.subheader(“下一天预测概览”)
-    st.write('这一页展示”下一天 PM2.5 预测”结果，共四个子页面，参数调节项均放在图表旁边。')
-
-    min_date = predictions[“date”].min().date()
-    max_date = predictions[“date”].max().date()
-    all_models = metric_frame[“model”].astype(str).tolist()
-
-    # 共享筛选器（对所有子页生效）
-    fc1, fc2 = st.columns([1.5, 1.5])
-    with fc1:
-        selected_models = st.multiselect(“筛选模型”, all_models, default=all_models, key=”nd_models”)
-    with fc2:
-        selected_dates = st.date_input(
-            “时间范围”,
-            value=(min_date, max_date),
-            min_value=min_date,
-            max_value=max_date,
-            key=”nextday_dates”,
+        render_panel("自动结论摘要", summary_text.replace("\n", "<br/>"))
+        render_panel(
+            "数据范围",
+            f"小时级主数据覆盖 {hourly_info['start']} 到 {hourly_info['end']}，"
+            f"平均 PM2.5 为 {hourly_info['pm25_mean']:.2f}，最大值为 {hourly_info['pm25_max']:.2f}。",
         )
 
-    if isinstance(selected_dates, (tuple, list)) and len(selected_dates) == 2:
-        start_date, end_date = selected_dates[0], selected_dates[1]
-    else:
-        start_date, end_date = min_date, max_date
+elif current_page == "数据处理与特征工程":
+    st.subheader("数据处理与特征工程")
 
-    active_models = selected_models if selected_models else all_models
-    filtered = predictions[
-        (predictions[“model”].astype(str).isin(active_models))
-        & (predictions[“date”].dt.date >= start_date)
-        & (predictions[“date”].dt.date <= end_date)
-    ].copy()
+    groups = {
+        "污染物滞后特征": [x for x in feature_names if x.startswith("pm25_lag")],
+        "滚动统计特征": [x for x in feature_names if x.startswith("pm25_roll")],
+        "趋势变化特征": [x for x in feature_names if x.startswith("pm25_diff")],
+        "时间与日历特征": [x for x in feature_names if x in {"hour_sin", "hour_cos", "month_sin", "month_cos", "weekday", "is_weekend", "is_holiday", "is_daytime", "is_rush_hour"}],
+        "气象与交互特征": [x for x in feature_names if x not in {
+            *[n for n in feature_names if n.startswith("pm25_lag")],
+            *[n for n in feature_names if n.startswith("pm25_roll")],
+            *[n for n in feature_names if n.startswith("pm25_diff")],
+            "hour_sin", "hour_cos", "month_sin", "month_cos", "weekday", "is_weekend", "is_holiday", "is_daytime", "is_rush_hour",
+        }],
+    }
 
-    st.markdown(“---”)
+    render_stat_cards(
+        [
+            ("数据起点", hourly_info["start"], "北京小时级主数据起始时间"),
+            ("数据终点", hourly_info["end"], "北京小时级主数据结束时间"),
+            ("训练样本数", f"{feature_meta['n_train']}", "按时间顺序切分得到"),
+            ("测试样本数", f"{feature_meta['n_test']}", "保留后 20% 作为测试集"),
+            ("特征总数", f"{feature_meta['n_features']}", "同一套输入同时支撑 h1 与 seq6"),
+        ]
+    )
 
-    if filtered.empty:
-        st.warning(“当前筛选条件下没有可展示的预测结果。”)
-    else:
-        filtered_metric = compute_metric_frame(filtered)
+    render_cards(
+        [
+            ("原始粒度", "实验使用北京城市级小时数据作为主数据源，并在跨城市实验中引入上海对齐小时数据。"),
+            ("清洗策略", "统一字段、数值化污染物与气象字段、保留时间顺序，并在特征构造前完成缺失值处理和格式清洗。"),
+            ("划分方式", "按时间顺序切分，前 80% 为训练集，后 20% 为测试集，避免时间穿越。"),
+        ]
+    )
 
-        tab_story, tab_compare, tab_error, tab_city = st.tabs([
-            “  Story  “,
-            “  Model Compare  “,
-            “  Error Diagnose  “,
-            “  City Transfer  “,
-        ])
-
-        # ── Story：概览卡片 + 排名表 ──────────────────────────────
-        with tab_story:
-            left_s, right_s = st.columns([2.2, 0.8])
-            with right_s:
-                ranking_metric = st.radio(
-                    “排序依据”,
-                    [“rmse”, “mae”, “mape”],
-                    format_func=lambda x: x.upper(),
-                    key=”story_rank”,
-                )
-            ranking_table = format_metric_table(filtered_metric, ranking_metric)
-            best_model = str(ranking_table.iloc[0][“模型”])
-            with left_s:
-                mc1, mc2, mc3 = st.columns(3)
-                mc1.metric(“当前最优模型”, best_model)
-                mc2.metric(f”最优 {ranking_metric.upper()}”, f”{float(ranking_table.iloc[0][ranking_metric.upper()]):.2f}”)
-                mc3.metric(“参与对比模型数”, str(len(ranking_table)))
-                st.markdown(“<br/>”, unsafe_allow_html=True)
-                render_cards([
-                    (“当前最优模型”, f”{best_model}，按 {ranking_metric.upper()} 排名第一。”),
-                    (“模型简介”, MODEL_DESCRIPTIONS.get(best_model, “”)),
-                    (“使用建议”, “先看 Model Compare 折线图，再看 Error Diagnose，最后看 City Transfer 散点。”),
-                ])
-                st.markdown(“<br/>”, unsafe_allow_html=True)
-                st.markdown(“**模型排名总表**”)
-                st.dataframe(ranking_table, use_container_width=True, hide_index=True)
-
-        # ── Model Compare：多模型预测折线图 ──────────────────────
-        with tab_compare:
-            chart_col, ctrl_col = st.columns([2.2, 0.8])
-            with ctrl_col:
-                st.markdown(“#### 图表控制”)
-                recent_days = st.slider(
-                    “展示最近多少天”,
-                    min_value=45, max_value=180, value=90, step=15,
-                    key=”cmp_days”,
-                )
-                st.caption(f”当前展示最近 **{recent_days}** 天。”)
-                st.markdown(“---”)
-                st.caption(“建议答辩时选 2~4 个模型，折线图会更清晰。”)
-            with chart_col:
-                st.markdown(“#### 真实值与多模型预测对比”)
-                st.caption(“观察不同模型在测试集上能否跟住真实 PM2.5 的波动趋势。”)
-                fig = plot_prediction_curves(filtered, days=recent_days)
-                st.pyplot(fig, use_container_width=True)
-
-        # ── Error Diagnose：指标柱状图 + AQI 热力图 ──────────────
-        with tab_error:
-            st.markdown(“#### 图2：模型误差指标对比”)
-            st.caption(“对比 RMSE / MAE / MAPE 三个维度下各模型的整体表现。”)
-            fig = plot_metric_bars(filtered_metric)
-            st.pyplot(fig, use_container_width=True)
-
-            st.markdown(“#### 图4：AQI 分层误差热力图”)
-            st.caption(“观察模型在不同污染等级区间上的误差表现，高污染区间通常更难预测。”)
-            fig = plot_aqi_error_heatmap(filtered)
-            st.pyplot(fig, use_container_width=True)
-
-        # ── City Transfer：散点拟合图 ─────────────────────────────
-        with tab_city:
-            chart_col2, ctrl_col2 = st.columns([2.2, 0.8])
-            with ctrl_col2:
-                st.markdown(“#### 模型选择”)
-                focus_model = st.selectbox(
-                    “重点查看模型”,
-                    active_models,
-                    key=”city_focus”,
-                )
-                st.markdown(f”**{focus_model}**”)
-                st.caption(MODEL_DESCRIPTIONS.get(focus_model, “”))
-            with chart_col2:
-                st.markdown(f”#### {focus_model} 预测散点图”)
-                st.caption(“散点越靠近对角线，说明预测值越接近真实值。”)
-                focus_metric = filtered_metric[
-                    filtered_metric[“model”].astype(str) == focus_model
-                ].reset_index(drop=True)
-                fig = plot_best_model_scatter(filtered, focus_metric)
-                st.pyplot(fig, use_container_width=True)
-
-elif current_page == "🔮  七天预测":
-    st.subheader("七天预测")
-    st.info("这个页面预留给“未来七天 PM2.5 预测”实验。等组员把 7 天预测实验跑好后，这里会接入新的结果图、误差表和分析结论。")
+    upper_left, upper_right = st.columns([0.9, 1.1])
+    with upper_left:
+        render_section_header("图 2", "数据处理流程", "先清洗、再构造特征、最后按时间切分，保证训练和测试严格顺序一致。")
+        render_panel(
+            "处理流程",
+            "1. 统一小时级污染物与气象字段。<br/>"
+            "2. 保证 datetime 升序排列。<br/>"
+            "3. 在特征工程前完成数值型字段清洗。<br/>"
+            "4. 构造滞后、滚动统计、时间与气象交互特征。<br/>"
+            "5. 使用固定时间切分生成训练集和测试集。",
+        )
+        render_panel(
+            "训练 / 测试时间范围",
+            f"训练集：{feature_meta['train_start']} 到 {feature_meta['train_end']}。<br/>"
+            f"测试集：{feature_meta['test_start']} 到 {feature_meta['test_end']}。",
+        )
+    with upper_right:
+        render_section_header("图 3", "小时级样本预览", "保留最近一段原始样本，方便展示字段结构、时间戳和气象变量。")
+        preview_rows = st.slider("预览行数", min_value=8, max_value=30, value=12, step=2, key="raw_preview")
+        preview_cols = ["datetime", "pm25", "pm10", "temp", "pres", "dewp", "humidity", "wind_speed", "precipitation"]
+        preview_df = hourly_df[preview_cols].tail(preview_rows).copy()
+        preview_df["datetime"] = preview_df["datetime"].dt.strftime("%Y-%m-%d %H:%M:%S")
+        st.dataframe(preview_df, use_container_width=True, hide_index=True, height=440)
 
     render_panel(
-        "后续这里会放什么",
-        "1. 未来7天真实值 vs 预测值折线图。"
-        "<br/>2. Day+1 到 Day+7 的 RMSE / MAE 曲线。"
-        "<br/>3. 模型 × Horizon 的误差热力图。"
-        "<br/>4. AQI 分层下的多步预测误差分析。"
-        "<br/>5. 七天预测实验结论与模型对比。",
+        "设计思路",
+        "这套 48 维特征围绕“短期惯性 + 日内周期 + 气象扰动”构建，目的是让同一套输入同时支撑 h1 单步预测和未来 6 小时序列预测。",
     )
 
-    roadmap = pd.DataFrame(
-        {
-            "预留模块": ["7天预测结果总览", "按天误差曲线", "AQI分层分析", "模型对比表", "实验结论"],
-            "当前状态": ["待接入", "待接入", "待接入", "待接入", "待接入"],
-            "说明": [
-                "展示未来7天预测曲线",
-                "展示 Day+1 ~ Day+7 的误差变化",
-                "分析高污染区间误差",
-                "对比 XGBoost / LSTM / Transformer 等",
-                "总结哪类模型远期更稳定",
-            ],
-        }
-    )
-    st.dataframe(roadmap, use_container_width=True, hide_index=True)
+    render_section_header("图 4", "特征组与重要性", "把长串特征拆成分组标签展示，再用重要性与消融实验验证哪些输入最关键。")
 
-elif current_page == "🤖  实际预测":
-    st.subheader("实际预测")
-    st.write("这个页面提供一个演示版的实际预测入口：你可以决定输入多少天的历史数据，并基于这些历史值预测下一天和未来七天的 PM2.5。")
+    col_a, col_b = st.columns([1.0, 1.0])
+    with col_a:
+        render_feature_groups(groups)
+    with col_b:
+        tabs = st.tabs(["h1 重要性", "6 小时重要性", "特征消融"])
+        with tabs[0]:
+            show_saved_figure("fig10_feature_importance_h1.png", "图 4  XGBoost feature importance for h1")
+        with tabs[1]:
+            show_saved_figure("fig11_feature_importance_seq6.png", "图 5  XGBoost feature importance for seq6")
+        with tabs[2]:
+            task_choice = st.radio("查看任务", ["h1", "seq6"], horizontal=True, key="ablation_static_task")
+            show_saved_figure(
+                "fig14_feature_ablation_h1.png" if task_choice == "h1" else "fig15_feature_ablation_seq6.png",
+                f"图 7  Feature ablation for {task_choice}",
+            )
+
+elif current_page == "h1 单步预测":
+    st.subheader("h1 单步预测")
+
+    render_section_header("图 1", "h1 综合表现", "使用正式成图展示预测曲线、模型排序与残差分布，不再混用页面临时绘图。")
+    show_saved_figure("fig01_h1_prediction_curve.png", "图 1a  h1 prediction curve")
+    show_saved_figure("fig02_h1_model_rmse.png", "图 1b  h1 model RMSE comparison")
+    show_saved_figure("fig03_h1_residual_kde.png", "图 1c  h1 residual KDE")
+
+    st.markdown("### h1 指标表")
+    metric_view = h1_metrics.copy()
+    st.dataframe(format_metric_table(metric_view), use_container_width=True, hide_index=True)
+
+    best_local = get_best_row(h1_metrics)
+    if best_local is not None:
+        render_panel(
+            "结果解读",
+            f"当前 h1 任务下，{best_local['model']} 的 RMSE 最低，为 {best_local['rmse']:.2f}。"
+            f" LSTM 在短期 1 小时预测上略优于 XGBoost 和 Transformer，说明它对局部时间依赖建模更有优势。",
+        )
+
+elif current_page == "6 小时序列预测":
+    st.subheader("6 小时序列预测")
+
+    render_section_header("图 2", "未来 6 小时逐小时预测综合表现", "左侧保留 h6 预测曲线，右侧同时展示随步长变化的 RMSE 趋势和均值排名。")
+    show_saved_figure("fig04_h6_prediction_curve.png", "图 2a  h6 prediction curve")
+    show_saved_figure("fig05_rmse_vs_horizon.png", "图 2b  RMSE vs horizon")
+    show_saved_figure("fig06_seq6_avg_rmse.png", "图 2c  seq6 average RMSE")
+
+    st.markdown("### 分步指标表")
+    step_table = seq6_metrics.copy()
+    st.dataframe(format_metric_table(step_table, include_horizon=True), use_container_width=True, hide_index=True)
+
+    st.markdown("### 6 小时均值指标表")
+    st.dataframe(format_metric_table(seq6_mean), use_container_width=True, hide_index=True)
 
     render_panel(
-        "说明",
-        "当前这一版是演示预测器，使用项目内北京日级数据训练的自回归 XGBoost 来做“下一天 + 未来七天”的实时推演。"
-        "<br/>后续如果 7 天正式实验完成，这里可以替换成正式多步模型。",
+        "结果解读",
+        "当前真实实验结果表明：XGBoost 在未来 6 小时平均指标上最好；Transformer 在 h1~h6 的多步走势上明显优于 LSTM；"
+        "随着步长从 h1 增加到 h6，几乎所有模型的误差都会持续变大。",
     )
 
-    input_days = st.slider("输入历史天数", min_value=30, max_value=90, value=30, step=5)
-    default_history = beijing_daily[["date", "PM2.5"]].tail(input_days).copy().reset_index(drop=True)
-    default_history["date"] = default_history["date"].dt.strftime("%Y-%m-%d")
-    default_history = default_history.rename(columns={"date": "日期", "PM2.5": "PM2.5"})
+elif current_page == "深入分析":
+    st.subheader("深入分析")
 
-    st.markdown("#### 可编辑输入数据")
-    st.caption("你可以直接在下面修改最近若干天的 PM2.5 数值，然后点击按钮重新预测。")
-    edited_history = st.data_editor(
-        default_history,
+    tab1, tab2, tab3, tab4 = st.tabs(["AQI 分层", "高污染与时段", "特征消融", "跨城市泛化"])
+
+    with tab1:
+        task_choice = st.radio("任务", ["h1", "seq6"], horizontal=True, key="aqi_task")
+        show_saved_figure(
+            "fig12_aqi_heatmap_h1.png" if task_choice == "h1" else "fig13_aqi_heatmap_seq6.png",
+            f"图 6  AQI bucket heatmap for {task_choice}",
+        )
+        horizon_choice = 1 if task_choice == "h1" else st.select_slider("查看步长", options=[1, 2, 3, 4, 5, 6], value=6)
+        table = aqi_bucket[(aqi_bucket["task"] == task_choice) & (aqi_bucket["horizon_hours"] == horizon_choice)].copy()
+        st.dataframe(table.round(2), use_container_width=True, hide_index=True)
+
+    with tab2:
+        left, right = st.columns([1.0, 1.0])
+        with left:
+            hp_task = st.radio("高污染任务", ["h1", "seq6"], horizontal=True, key="hp_task")
+            show_saved_figure(
+                "fig16_high_pollution_h1.png" if hp_task == "h1" else "fig17_high_pollution_seq6.png",
+                f"图 8  High-pollution error for {hp_task}",
+            )
+            hp_view = high_pollution[high_pollution["task"] == hp_task].copy()
+            st.dataframe(hp_view.round(2), use_container_width=True, hide_index=True)
+        with right:
+            task_choice = st.radio("时段分析任务", ["h1", "seq6"], horizontal=True, key="hourly_task")
+            show_saved_figure(
+                "fig18_error_by_hour_h1.png" if task_choice == "h1" else "fig19_error_by_hour_seq6.png",
+                f"图 9  Hourly error curve for {task_choice}",
+            )
+            show_saved_figure(
+                "fig20_dayperiod_heatmap_h1.png" if task_choice == "h1" else "fig21_dayperiod_heatmap_seq6.png",
+                f"图 10  Day-period heatmap for {task_choice}",
+            )
+            horizon_choice = 1 if task_choice == "h1" else 6
+            day_view = dayperiod_error[(dayperiod_error["task"] == task_choice) & (dayperiod_error["horizon_hours"] == horizon_choice)].copy()
+            st.dataframe(day_view.round(2), use_container_width=True, hide_index=True)
+
+    with tab3:
+        task_choice = st.radio("查看任务", ["h1", "seq6"], horizontal=True, key="ablation_task_2")
+        show_saved_figure(
+            "fig14_feature_ablation_h1.png" if task_choice == "h1" else "fig15_feature_ablation_seq6.png",
+            f"图 7  Feature ablation for {task_choice}",
+        )
+        ablation_view = feature_ablation[feature_ablation["task"] == task_choice].copy()
+        st.dataframe(ablation_view.round(2), use_container_width=True, hide_index=True)
+
+    with tab4:
+        show_saved_figure("fig22_cross_city_rmse.png", "图 11a  Cross-city RMSE comparison")
+        show_saved_figure("fig23_generalization_gap.png", "图 11b  Generalization gap")
+        st.dataframe(cross_city.round(2), use_container_width=True, hide_index=True)
+        render_panel(
+            "分析结论",
+            "跨城市泛化目前基于 XGBoost 完成。北京训练、上海测试时，h1 还能保持可接受水平，但步长增加后误差持续扩大，"
+            "说明 6 小时序列任务对城市分布差异更敏感。",
+        )
+
+elif current_page == "真实预测":
+    st.subheader("真实预测")
+    st.write("在这页中，你可以输入最近一段小时级观测数据，系统会直接调用仓库中已经训练完成的深度模型，给出 h1 单步预测和未来 6 小时逐小时预测结果。")
+
+    render_panel(
+        "输入要求",
+        "建议直接保留最近 120 小时的数据。<br/>"
+        "若要完整运行 h1 + 未来 6 小时序列预测，至少需要 96 小时原始观测。<br/>"
+        "必填列：datetime、pm25、temp、pres、dewp、humidity、wind_dir、wind_speed、precipitation。<br/>"
+        "如果不上传 CSV，可以直接在下方表格里修改默认示例数据。",
+    )
+
+    upload = st.file_uploader("上传小时级 CSV（可选）", type=["csv"])
+    default_table = get_realtime_default_table(hourly_df)
+    if upload is not None:
+        uploaded_df = pd.read_csv(upload)
+        input_table = uploaded_df.copy()
+    else:
+        input_table = default_table.copy()
+
+    input_table = input_table[REALTIME_COLUMNS].copy()
+    edited = st.data_editor(
+        input_table,
         use_container_width=True,
         hide_index=True,
-        num_rows="fixed",
-        key="history_editor",
+        num_rows="dynamic",
+        key="realtime_editor",
     )
 
     if st.button("开始预测", type="primary"):
         try:
-            history_for_pred = edited_history.copy()
-            history_for_pred["date"] = pd.to_datetime(history_for_pred["日期"])
-            history_for_pred["PM2.5"] = pd.to_numeric(history_for_pred["PM2.5"])
-            history_for_pred = history_for_pred.sort_values("date").reset_index(drop=True)
+            summary, detail = run_realtime_prediction(edited)
+            c1, c2, c3 = st.columns(3)
+            c1.metric("h1 预测值", f"{summary.iloc[0]['预测值']:.2f}")
+            c2.metric("未来 6 小时均值", f"{summary.iloc[1]['预测值']:.2f}")
+            c3.metric("未来 6 小时峰值", f"{summary.iloc[2]['预测值']:.2f}")
 
-            if history_for_pred["PM2.5"].isna().any():
-                st.error("输入数据中存在空值，请补全后再预测。")
-            elif len(history_for_pred) < 30:
-                st.error("为了保证滞后特征足够，输入历史天数至少需要 30 天。")
-            else:
-                forecast_df = recursive_demo_forecast(history_for_pred, steps=7)
-                next_day_pm25 = float(forecast_df.iloc[0]["预测PM2.5"])
-                avg_7day_pm25 = float(forecast_df["预测PM2.5"].mean())
+            left, right = st.columns([0.95, 1.05])
+            with left:
+                st.markdown("### 分步预测结果")
+                st.dataframe(detail, use_container_width=True, hide_index=True)
+            with right:
+                st.pyplot(draw_realtime_forecast(detail), use_container_width=True)
 
-                metric_col_1, metric_col_2, metric_col_3 = st.columns(3)
-                metric_col_1.metric("下一天预测值", f"{next_day_pm25:.2f}")
-                metric_col_2.metric("未来7天平均预测值", f"{avg_7day_pm25:.2f}")
-                metric_col_3.metric("未来7天峰值预测", f"{float(forecast_df['预测PM2.5'].max()):.2f}")
-
-                st.markdown("#### 预测结果表")
-                st.dataframe(forecast_df, use_container_width=True, hide_index=True)
-
-                st.markdown("#### 预测结果图")
-                fig = plot_demo_forecast(history_for_pred, forecast_df)
-                st.pyplot(fig, use_container_width=True)
+            render_panel(
+                "推理说明",
+                "当前实时预测采用与现有实验权重直接对应的深度模型组合：h1 使用 LSTM 单步模型，"
+                "未来 6 小时使用 Transformer 序列模型。这样既能保持真实模型推理，也能直接输出逐小时结果。",
+            )
         except Exception as exc:
             st.error(f"预测失败：{exc}")
+
+if registry.empty:
+    st.caption("提示：experiment_registry.csv 暂未加载。")
