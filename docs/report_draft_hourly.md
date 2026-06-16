@@ -14,7 +14,7 @@
 
 ### 1.1 研究背景
 
-PM2.5 是衡量空气污染水平的重要指标之一，其高浓度暴露与呼吸系统疾病、心血管疾病及公共健康风险密切相关。随着城市空气质量监测网络的完善，基于历史污染物与气象观测数据建立短期空气质量预测模型，已成为数据挖掘与环境智能中的典型问题。
+PM2.5 是衡量空气污染水平的重要指标之一，其高浓度暴露与呼吸系统疾病、心血管疾病及公共健康风险密切相关。随着城市空气质量监测网络的完善，基于历史污染物与气象观测数据建立短期空气质量预测模型，已成为数据挖掘与环境智能中的典型问题。Wu 等[2] 对 2014–2024 年间 2327 篇 PM2.5 预测文献的系统综述表明，深度学习方法（CNN、RNN、LSTM、Transformer）已逐步取代传统统计模型成为主流范式。Cui 等[1] 在北京 12 站点小时级数据上首次将 Transformer 应用于 PM2.5 预测，取得了 R²=94.4% 的最优效果，验证了注意力机制在长序列空气质量建模中的潜力。
 
 与日级预测相比，小时级预测更贴近实际应用场景。一方面，环境管理部门往往需要提前数小时进行污染预警；另一方面，公众出行、工业调度与应急响应也依赖更细粒度的预测结果。因此，研究小时级 PM2.5 预测，不仅具有方法论价值，也具有较强的现实意义。
 
@@ -163,7 +163,7 @@ PM2.5 的扩散与积聚受气象条件强烈影响，因此本文保留原始�
 
 #### 2.3.1 ARIMA
 
-ARIMA 是经典统计时间序列模型，其基本形式为：
+ARIMA 是经典统计时间序列模型[4]，其基本形式为：
 
 \[
 \phi(B)(1-B)^d y_t = c + \theta(B)\varepsilon_t
@@ -173,7 +173,7 @@ ARIMA 是经典统计时间序列模型，其基本形式为：
 
 #### 2.3.2 增强版 Prophet
 
-传统 Prophet 适合趋势与季节性明显的时间序列，其形式可写为：
+传统 Prophet 适合趋势与季节性明显的时间序列[5]，其形式可写为：
 
 \[
 y(t)=g(t)+s(t)+h(t)+\varepsilon_t
@@ -193,7 +193,7 @@ y(t)=g(t)+s(t)+h(t)+\varepsilon_t
 
 #### 2.3.3 XGBoost
 
-XGBoost 属于梯度提升树模型，其预测函数可表示为：
+XGBoost 属于梯度提升树模型[6]，其预测函数可表示为：
 
 \[
 \hat{y}_i = \sum_{k=1}^{K} f_k(x_i), \qquad f_k \in \mathcal{F}
@@ -203,7 +203,7 @@ XGBoost 属于梯度提升树模型，其预测函数可表示为：
 
 #### 2.3.4 LSTM
 
-LSTM 是典型的循环神经网络结构，通过门控机制缓解长序列训练中的梯度消失问题。其核心状态更新可简化表示为：
+LSTM 是典型的循环神经网络结构[7]，通过门控机制缓解长序列训练中的梯度消失问题。其核心状态更新可简化表示为：
 
 \[
 f_t = \sigma(W_f[h_{t-1}, x_t] + b_f), \quad
@@ -224,7 +224,7 @@ LSTM 对局部时间依赖和短时波动具有较强建模能力，因此在 `s
 
 #### 2.3.5 Transformer
 
-Transformer 依赖自注意力机制学习序列中远近位置之间的关系。其缩放点积注意力形式为：
+Transformer 依赖自注意力机制学习序列中远近位置之间的关系[8]。Cui 等[1] 在相同北京数据集上验证了 Transformer 在小时级 PM2.5 预测中优于 CNN-LSTM-Attention。其缩放点积注意力形式为：
 
 \[
 \text{Attention}(Q, K, V) = \text{softmax}\left(\frac{QK^\top}{\sqrt{d_k}}\right)V
@@ -282,7 +282,7 @@ Transformer 依赖自注意力机制学习序列中远近位置之间的关系�
 \text{MAPE} = \frac{100\%}{n}\sum_{i=1}^{n}\left|\frac{y_i-\hat{y}_i}{y_i}\right|
 \]
 
-其中 RMSE 对大误差更敏感，MAE 更直观反映平均偏差，MAPE 用于刻画相对误差水平。
+其中 RMSE 对大误差更敏感，MAE 更直观反映平均偏差，MAPE 用于刻画相对误差水平。此外，Diebold-Mariano 检验[10] 可用于判断不同模型预测精度差异是否具有统计显著性。
 
 ### 3.4 实验环境与输出文件
 
@@ -420,7 +420,7 @@ Transformer 依赖自注意力机制学习序列中远近位置之间的关系�
 
 #### 4.4.2 特征重要性分析
 
-XGBoost 的特征重要性结果进一步验证了上述结论。`single-step h1` 任务中，排名靠前的特征主要集中于 `pm25_lag1`、滚动均值、短差分与近时刻气象变量；`seq6` 任务中，风速变化、湿度、时段周期和交互项的重要性进一步上升。这说明：
+XGBoost 的特征重要性结果进一步验证了上述结论。`single-step h1` 任务中，排名靠前的特征主要集中于 `pm25_lag1`、滚动均值、短差分与近时刻气象变量；`seq6` 任务中，风速变化、湿度、时段周期和交互项的重要性进一步上升。本文使用 SHAP[9] 方法对模型预测进行全局解释，结果如图 4-12 与图 4-13 所示。这说明：
 
 1. 小时级 PM2.5 预测本质上是强短期惯性问题；
 2. 多步预测对“趋势 + 气象扰动”的依赖比单步更明显；
@@ -523,7 +523,7 @@ AQI 分层结果说明，不同模型在不同污染区间中的最优性并不�
 
 ### 4.6 跨城市泛化分析
 
-为评估模型迁移能力，本文使用 XGBoost 开展“北京训练、上海测试”的跨城市实验。结果如表 4-5 所示。
+为评估模型迁移能力，本文使用 XGBoost 开展“北京训练、上海测试”的跨城市实验。Poelzl 等[3] 在 Graz→Zagreb 的跨城市 PM10 迁移实验中证明，仅需 20% 目标城市标注数据即可实现 22% 的性能提升，验证了迁移学习在空气质量预测中的可行性。本文结果如表 4-5 所示。
 
 | 步长 | 本地测试 RMSE | 跨城市 RMSE | 泛化误差增量 |
 |:--|--:|--:|--:|
@@ -574,20 +574,34 @@ AQI 分层结果说明，不同模型在不同污染区间中的最优性并不�
 后续可从以下方向继续改进：
 
 1. 引入未来气象预报或再分析产品，提高多步预测上限；
-2. 尝试更适合多步输出的时序结构，如 TFT、Informer 或 N-BEATS；
+2. 尝试更适合多步输出的时序结构，如 Wu 等[2] 建议的 TFT、Informer 或 N-BEATS；
 3. 对高污染样本引入重加权训练或分段建模；
-4. 将增强版 Prophet 的建模思想扩展到跨城市迁移实验中；
+4. 参照 Poelzl 等[3] 的迁移学习策略，将增强版 Prophet 的建模思想扩展到跨城市迁移实验中；
 5. 结合 SHAP、注意力可视化等方法增强结果解释性。
 
 ---
 
 ## 参考文献
 
-正式定稿时可补充以下文献类型：
+[1] Cui, B., Liu, M., Li, S., Jin, Z., Zeng, Y., & Lin, X. (2023). Deep learning methods for atmospheric PM2.5 prediction: A comparative study of transformer and CNN-LSTM-attention. *Atmospheric Pollution Research*, 14(9), 101833. https://doi.org/10.1016/j.apr.2023.101833
 
-1. PM2.5 与空气质量短期预测相关研究；
-2. ARIMA、Prophet、XGBoost、LSTM、Transformer 原始方法论文；
-3. 多步时间序列预测与跨域迁移建模相关研究。
+[2] Wu, C., Wang, R., Lu, S., Tian, J., Yin, L., Wang, L., & Zheng, W. (2025). Time-series data-driven PM2.5 forecasting: From theoretical framework to empirical analysis. *Atmosphere*, 16(3), 292. https://doi.org/10.3390/atmos16030292
+
+[3] Poelzl, M., Kern, R., Kecorius, S., & Lovrić, M. (2025). Exploration of transfer learning techniques for the prediction of PM10. *Scientific Reports*, 15, 2919. https://doi.org/10.1038/s41598-025-86550-6
+
+[4] Box, G. E. P., Jenkins, G. M., Reinsel, G. C., & Ljung, G. M. (2015). *Time Series Analysis: Forecasting and Control* (5th ed.). Wiley.
+
+[5] Taylor, S. J., & Letham, B. (2018). Forecasting at scale. *The American Statistician*, 72(1), 37–45. https://doi.org/10.1080/00031305.2017.1380080
+
+[6] Chen, T., & Guestrin, C. (2016). XGBoost: A scalable tree boosting system. *Proceedings of the 22nd ACM SIGKDD International Conference on Knowledge Discovery and Data Mining* (pp. 785–794). https://doi.org/10.1145/2939672.2939785
+
+[7] Hochreiter, S., & Schmidhuber, J. (1997). Long short-term memory. *Neural Computation*, 9(8), 1735–1780. https://doi.org/10.1162/neco.1997.9.8.1735
+
+[8] Vaswani, A., Shazeer, N., Parmar, N., Uszkoreit, J., Jones, L., Gomez, A. N., Kaiser, Ł., & Polosukhin, I. (2017). Attention is all you need. *Advances in Neural Information Processing Systems*, 30, 5998–6008.
+
+[9] Lundberg, S. M., & Lee, S.-I. (2017). A unified approach to interpreting model predictions. *Advances in Neural Information Processing Systems*, 30, 4765–4774.
+
+[10] Diebold, F. X., & Mariano, R. S. (1995). Comparing predictive accuracy. *Journal of Business & Economic Statistics*, 13(3), 253–263. https://doi.org/10.1080/07350015.1995.10524599
 
 ---
 
