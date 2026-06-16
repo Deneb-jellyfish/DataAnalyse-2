@@ -2,7 +2,7 @@
 
 Git 仓库链接：`https://github.com/Deneb-jellyfish/DataAnalyse-2.git`
 
-本仓库已经整理为课程提交版本。顶层只保留最终交付件，所有代码、数据、脚本、实验输出和补充文档统一放在 `完整代码/` 中，方便老师直接查阅。
+
 
 ## 1. 顶层提交内容
 
@@ -272,7 +272,6 @@ py -3.12 -m streamlit run app.py
 
 ## 9. 说明
 
-- 本次整理主要是为了适配课程提交格式，代码和实验结果都保留在 `完整代码/` 中。
 - 仓库内部相对路径已经保持一致，整理后仍可从 `完整代码/` 内继续运行脚本。
 - 当前小时级实验输出目录已经整理为：
   `analyses/`、`configs/`、`figures/`、`histories/`、`metrics/`、`models/`、`predictions/`、`summaries/`。
