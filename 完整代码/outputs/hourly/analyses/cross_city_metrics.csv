@@ -1,0 +1,8 @@
+model,task,horizon_hours,train_city,test_city,rmse,mae,mape,n_samples,notes
+XGBoost,h1,1,Beijing,Shanghai,17.86634213833317,9.010517430721132,17.00266277814165,17746,trained_on_beijing_tested_on_shanghai
+XGBoost,seq6,1,Beijing,Shanghai,17.86634213833317,9.010517430721132,17.00266277814165,17746,trained_on_beijing_tested_on_shanghai
+XGBoost,seq6,2,Beijing,Shanghai,25.685486924108,13.205957235136665,23.264903640602174,17745,trained_on_beijing_tested_on_shanghai
+XGBoost,seq6,3,Beijing,Shanghai,29.88441156805152,16.119206501824976,29.196560900147922,17744,trained_on_beijing_tested_on_shanghai
+XGBoost,seq6,4,Beijing,Shanghai,33.31728797352549,18.83079674698729,34.55627635592258,17743,trained_on_beijing_tested_on_shanghai
+XGBoost,seq6,5,Beijing,Shanghai,34.193284186208636,19.355701129438618,38.02539948024543,17742,trained_on_beijing_tested_on_shanghai
+XGBoost,seq6,6,Beijing,Shanghai,34.95338800510852,20.634746470856406,44.08806361349918,17741,trained_on_beijing_tested_on_shanghai

@@ -1,0 +1,14 @@
+data/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ipynb_checkpoints/
+.DS_Store
+*.pkl
+.env
+.venv/
+streamlit_stdout*.log
+streamlit_stderr*.log
+tmp_*.png
+_tmp_*
+

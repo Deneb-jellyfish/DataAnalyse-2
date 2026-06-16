@@ -1,0 +1,14 @@
+{
+  "task": "h1",
+  "output_len": 1,
+  "seq_len": 48,
+  "hidden_dim": 128,
+  "num_layers": 3,
+  "dropout": 0.3,
+  "lr": 0.0003,
+  "batch_size": 32,
+  "patience": 20,
+  "epochs": 120,
+  "train_time_s": 2752.9,
+  "best_val_loss": 117.44485093462735
+}
